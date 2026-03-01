@@ -91,12 +91,12 @@ impl VmeFS {
             ino = 1;
         }
 
-        // Read size and mode from .meta file, error out if it fails (except for root)
-        let (size, mode) = if path == self.root {
-            (0, metadata.mode())
+        // Read metadata from .meta file, error out if it fails (except for root)
+        let (size, mode, uid, gid) = if path == self.root {
+            (0, metadata.mode(), metadata.uid(), metadata.gid())
         } else {
             let m = meta::load_metadata(path)?;
-            (m.metadata.size, m.metadata.mode)
+            (m.metadata.size, m.metadata.mode, m.metadata.uid, m.metadata.gid)
         };
 
         Ok(FileAttr {
@@ -110,8 +110,8 @@ impl VmeFS {
             kind,
             perm: mode as u16,
             nlink: metadata.nlink() as u32,
-            uid: metadata.uid(),
-            gid: metadata.gid(),
+            uid,
+            gid,
             rdev: metadata.rdev() as u32,
             flags: 0,
             blksize: metadata.blksize() as u32,
@@ -169,8 +169,8 @@ impl Filesystem for VmeFS {
         _req: &Request,
         ino: u64,
         mode: Option<u32>,
-        _uid: Option<u32>,
-        _gid: Option<u32>,
+        uid: Option<u32>,
+        gid: Option<u32>,
         size: Option<u64>,
         _atime: Option<fuser::TimeOrNow>,
         _mtime: Option<fuser::TimeOrNow>,
@@ -193,6 +193,8 @@ impl Filesystem for VmeFS {
         let metadata_update = meta::VmeMetadataUpdate {
             size,
             mode,
+            uid,
+            gid,
         };
         if let Some(s) = size {
             let encrypted_content = fs::read(&path).unwrap_or_default();
@@ -378,10 +380,11 @@ impl Filesystem for VmeFS {
         content[offset..offset + data.len()].copy_from_slice(data);
         
         match self.encrypt(&content) {
-            Ok(new_encrypted_content) => {
-                match fs::write(&path, new_encrypted_content) {
+            Ok(encrypted) => {
+                match fs::write(&path, encrypted) {
                     Ok(_) => {
-                        let _ = meta::update_metadata(&path, meta::VmeMetadataUpdate { size: Some(content.len() as u64), mode: None });
+                        let update = meta::VmeMetadataUpdate { size: Some(content.len() as u64), ..Default::default() };
+                        let _ = meta::update_metadata(&path, update);
                         reply.written(data.len() as u32)
                     },
                     Err(e) => reply.error(e.raw_os_error().unwrap_or(ENOENT)),
@@ -393,7 +396,7 @@ impl Filesystem for VmeFS {
 
     fn create(
         &mut self,
-        _req: &Request,
+        req: &Request,
         parent: u64,
         name: &OsStr,
         mode: u32,
@@ -412,7 +415,12 @@ impl Filesystem for VmeFS {
         
         match fs::File::create(&child_path) {
             Ok(_) => {
-                let _ = meta::create_metadata(&child_path, meta::VmeMetadataUpdate { size: Some(0), mode: Some(mode & !umask) });
+                let _ = meta::create_metadata(&child_path, meta::VmeMetadataUpdate { 
+                    size: Some(0), 
+                    mode: Some(mode & !umask),
+                    uid: Some(req.uid()),
+                    gid: Some(req.gid()),
+                });
                 match self.get_attr(&child_path) {
                     Ok(attr) => reply.created(&TTL, &attr, 0, 0, 0),
                     Err(e) => reply.error(e),
@@ -422,7 +430,7 @@ impl Filesystem for VmeFS {
         }
     }
 
-    fn mkdir(&mut self, _req: &Request, parent: u64, name: &OsStr, mode: u32, umask: u32, reply: ReplyEntry) {
+    fn mkdir(&mut self, req: &Request, parent: u64, name: &OsStr, mode: u32, umask: u32, reply: ReplyEntry) {
         let parent_path = match self.find_path_by_ino(parent) {
             Some(p) => p,
             None => {
@@ -434,7 +442,12 @@ impl Filesystem for VmeFS {
         
         match fs::create_dir(&child_path) {
             Ok(_) => {
-                let _ = meta::create_metadata(&child_path, meta::VmeMetadataUpdate { size: Some(0), mode: Some(mode & !umask) });
+                let _ = meta::create_metadata(&child_path, meta::VmeMetadataUpdate { 
+                    size: Some(0), 
+                    mode: Some(mode & !umask),
+                    uid: Some(req.uid()),
+                    gid: Some(req.gid()),
+                });
                 match self.get_attr(&child_path) {
                     Ok(attr) => reply.entry(&TTL, &attr, 0),
                     Err(e) => reply.error(e),
