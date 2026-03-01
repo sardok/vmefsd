@@ -1,50 +1,79 @@
 #!/bin/bash
 set -e
 
+# Use /tmp directories for testing
 MOUNTPOINT="/tmp/vmefs_mnt"
 BACKEND="/tmp/vmefs_backend"
 
-# Ensure directories exist
-mkdir -p $MOUNTPOINT
-mkdir -p $BACKEND
-
 # Clean up any previous mount
-fusermount -u $MOUNTPOINT || true
-rm -rf $MOUNTPOINT/*
-rm -rf $BACKEND/*
+fusermount -u "$MOUNTPOINT" 2>/dev/null || true
+# Wait a bit for unmount to settle
+sleep 1
+
+# Remove and recreate directories to ensure they are clean
+rm -rf "$MOUNTPOINT" "$BACKEND"
+mkdir -p "$MOUNTPOINT"
+mkdir -p "$BACKEND"
 
 # Build the project
 cargo build
 
 # Run VmeFS in the background
-RUST_BACKTRACE=1 ./target/debug/vmefsd $MOUNTPOINT &
+# Pass mountpoint and backend path
+./target/debug/vmefsd "$MOUNTPOINT" "$BACKEND" &
 VMEFS_PID=$!
 
 # Wait for mount
 sleep 2
 
 # Check if mounted
-if ! mount | grep -q $MOUNTPOINT; then
+if ! mount | grep -q "$MOUNTPOINT"; then
     echo "Mount failed!"
     kill $VMEFS_PID || true
     exit 1
 fi
 
 echo "Testing file creation..."
-echo "Hello VmeFS!" > $MOUNTPOINT/test.txt
-cat $MOUNTPOINT/test.txt
+echo "Hello VmeFS!" > "$MOUNTPOINT/test.txt"
+cat "$MOUNTPOINT/test.txt"
 
 echo "Testing directory creation..."
-mkdir $MOUNTPOINT/subdir
-echo "Inside subdir" > $MOUNTPOINT/subdir/subtest.txt
-ls -R $MOUNTPOINT
+# Directory creation on the mountpoint
+mkdir "$MOUNTPOINT/subdir"
+echo "Inside subdir" > "$MOUNTPOINT/subdir/subtest.txt"
+ls -R "$MOUNTPOINT"
 
-echo "Verifying backend..."
-ls -R $BACKEND
-cat $BACKEND/test.txt
+echo "Verifying backend (should be encrypted and have .meta files)..."
+ls -R "$BACKEND"
+
+# Check for .meta files (with set_extension, test.txt becomes test.meta)
+if [ -f "$BACKEND/test.meta" ]; then
+    echo "OK: test.meta exists"
+else
+    echo "ERROR: test.meta missing"
+    ls -la "$BACKEND"
+    exit 1
+fi
+
+if [ -f "$BACKEND/subdir.meta" ]; then
+    echo "OK: subdir.meta exists"
+else
+    echo "ERROR: subdir.meta missing"
+    exit 1
+fi
+
+if [ -f "$BACKEND/subdir/subtest.meta" ]; then
+    echo "OK: subdir/subtest.meta exists"
+else
+    echo "ERROR: subdir/subtest.meta missing"
+    ls -la "$BACKEND/subdir"
+    exit 1
+fi
+
+hexdump -C "$BACKEND/test.txt" || true
 
 # Clean up
-fusermount -u $MOUNTPOINT
+fusermount -u "$MOUNTPOINT"
 kill $VMEFS_PID || true
 
 echo "Test completed successfully!"
