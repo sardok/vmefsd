@@ -4,7 +4,7 @@ use fuser::{
     FileAttr, FileType, Filesystem, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty,
     ReplyEntry, ReplyWrite, Request,
 };
-use libc::{EIO, ENOENT, EINVAL};
+use libc::{EINVAL, EIO, ENOENT};
 use std::ffi::OsStr;
 use std::fs;
 use std::os::unix::fs::MetadataExt;
@@ -34,17 +34,13 @@ impl VmeFS {
         }
         let cipher = Aes256Gcm::new(STATIC_KEY.into());
         let nonce = Nonce::from_slice(STATIC_NONCE);
-        cipher
-            .decrypt(nonce, data)
-            .map_err(|_| EIO)
+        cipher.decrypt(nonce, data).map_err(|_| EIO)
     }
 
     fn encrypt(&self, data: &[u8]) -> Result<Vec<u8>, i32> {
         let cipher = Aes256Gcm::new(STATIC_KEY.into());
         let nonce = Nonce::from_slice(STATIC_NONCE);
-        cipher
-            .encrypt(nonce, data)
-            .map_err(|_| EIO)
+        cipher.encrypt(nonce, data).map_err(|_| EIO)
     }
 
     fn find_path_by_ino(&self, target_ino: u64) -> Option<PathBuf> {
@@ -75,7 +71,7 @@ impl VmeFS {
 
     fn get_attr(&self, path: &Path) -> Result<FileAttr, i32> {
         let metadata = fs::metadata(path).map_err(|e| e.raw_os_error().unwrap_or(ENOENT))?;
-        
+
         let kind = if metadata.is_dir() {
             FileType::Directory
         } else if metadata.is_file() {
@@ -96,7 +92,12 @@ impl VmeFS {
             (0, metadata.mode(), metadata.uid(), metadata.gid())
         } else {
             let m = meta::load_metadata(path)?;
-            (m.metadata.size, m.metadata.mode, m.metadata.uid, m.metadata.gid)
+            (
+                m.metadata.size,
+                m.metadata.mode,
+                m.metadata.uid,
+                m.metadata.gid,
+            )
         };
 
         Ok(FileAttr {
@@ -138,7 +139,7 @@ impl Filesystem for VmeFS {
             }
         };
         let child_path = parent_path.join(name);
-        
+
         if child_path.exists() {
             match self.get_attr(&child_path) {
                 Ok(attr) => reply.entry(&TTL, &attr, 0),
@@ -157,7 +158,7 @@ impl Filesystem for VmeFS {
                 return;
             }
         };
-        
+
         match self.get_attr(&path) {
             Ok(attr) => reply.attr(&TTL, &attr),
             Err(e) => reply.error(e),
@@ -325,20 +326,18 @@ impl Filesystem for VmeFS {
         };
 
         match fs::read(&path) {
-            Ok(encrypted_content) => {
-                match self.decrypt(&encrypted_content) {
-                    Ok(content) => {
-                        let offset = offset as usize;
-                        if offset < content.len() {
-                            let end = std::cmp::min(offset + size as usize, content.len());
-                            reply.data(&content[offset..end]);
-                        } else {
-                            reply.data(&[]);
-                        }
+            Ok(encrypted_content) => match self.decrypt(&encrypted_content) {
+                Ok(content) => {
+                    let offset = offset as usize;
+                    if offset < content.len() {
+                        let end = std::cmp::min(offset + size as usize, content.len());
+                        reply.data(&content[offset..end]);
+                    } else {
+                        reply.data(&[]);
                     }
-                    Err(e) => reply.error(e),
                 }
-            }
+                Err(e) => reply.error(e),
+            },
             Err(e) => reply.error(e.raw_os_error().unwrap_or(ENOENT)),
         }
     }
@@ -371,25 +370,26 @@ impl Filesystem for VmeFS {
                 return;
             }
         };
-        
+
         let offset = offset as usize;
         if offset + data.len() > content.len() {
             content.resize(offset + data.len(), 0);
         }
-        
+
         content[offset..offset + data.len()].copy_from_slice(data);
-        
+
         match self.encrypt(&content) {
-            Ok(encrypted) => {
-                match fs::write(&path, encrypted) {
-                    Ok(_) => {
-                        let update = meta::VmeMetadataUpdate { size: Some(content.len() as u64), ..Default::default() };
-                        let _ = meta::update_metadata(&path, update);
-                        reply.written(data.len() as u32)
-                    },
-                    Err(e) => reply.error(e.raw_os_error().unwrap_or(ENOENT)),
+            Ok(encrypted) => match fs::write(&path, encrypted) {
+                Ok(_) => {
+                    let update = meta::VmeMetadataUpdate {
+                        size: Some(content.len() as u64),
+                        ..Default::default()
+                    };
+                    let _ = meta::update_metadata(&path, update);
+                    reply.written(data.len() as u32)
                 }
-            }
+                Err(e) => reply.error(e.raw_os_error().unwrap_or(ENOENT)),
+            },
             Err(e) => reply.error(e),
         }
     }
@@ -412,15 +412,18 @@ impl Filesystem for VmeFS {
             }
         };
         let child_path = parent_path.join(name);
-        
+
         match fs::File::create(&child_path) {
             Ok(_) => {
-                let _ = meta::create_metadata(&child_path, meta::VmeMetadataUpdate { 
-                    size: Some(0), 
-                    mode: Some(mode & !umask),
-                    uid: Some(req.uid()),
-                    gid: Some(req.gid()),
-                });
+                let _ = meta::create_metadata(
+                    &child_path,
+                    meta::VmeMetadataUpdate {
+                        size: Some(0),
+                        mode: Some(mode & !umask),
+                        uid: Some(req.uid()),
+                        gid: Some(req.gid()),
+                    },
+                );
                 match self.get_attr(&child_path) {
                     Ok(attr) => reply.created(&TTL, &attr, 0, 0, 0),
                     Err(e) => reply.error(e),
@@ -430,7 +433,15 @@ impl Filesystem for VmeFS {
         }
     }
 
-    fn mkdir(&mut self, req: &Request, parent: u64, name: &OsStr, mode: u32, umask: u32, reply: ReplyEntry) {
+    fn mkdir(
+        &mut self,
+        req: &Request,
+        parent: u64,
+        name: &OsStr,
+        mode: u32,
+        umask: u32,
+        reply: ReplyEntry,
+    ) {
         let parent_path = match self.find_path_by_ino(parent) {
             Some(p) => p,
             None => {
@@ -439,15 +450,18 @@ impl Filesystem for VmeFS {
             }
         };
         let child_path = parent_path.join(name);
-        
+
         match fs::create_dir(&child_path) {
             Ok(_) => {
-                let _ = meta::create_metadata(&child_path, meta::VmeMetadataUpdate { 
-                    size: Some(0), 
-                    mode: Some(mode & !umask),
-                    uid: Some(req.uid()),
-                    gid: Some(req.gid()),
-                });
+                let _ = meta::create_metadata(
+                    &child_path,
+                    meta::VmeMetadataUpdate {
+                        size: Some(0),
+                        mode: Some(mode & !umask),
+                        uid: Some(req.uid()),
+                        gid: Some(req.gid()),
+                    },
+                );
                 match self.get_attr(&child_path) {
                     Ok(attr) => reply.entry(&TTL, &attr, 0),
                     Err(e) => reply.error(e),
@@ -466,12 +480,12 @@ impl Filesystem for VmeFS {
             }
         };
         let child_path = parent_path.join(name);
-        
+
         match fs::remove_file(&child_path) {
             Ok(_) => {
                 let _ = meta::remove_metadata(&child_path);
                 reply.ok()
-            },
+            }
             Err(e) => reply.error(e.raw_os_error().unwrap_or(ENOENT)),
         }
     }
@@ -485,12 +499,12 @@ impl Filesystem for VmeFS {
             }
         };
         let child_path = parent_path.join(name);
-        
+
         match fs::remove_dir(&child_path) {
             Ok(_) => {
-                let _  = meta::remove_metadata(&child_path);
+                let _ = meta::remove_metadata(&child_path);
                 reply.ok()
-            },
+            }
             Err(e) => reply.error(e.raw_os_error().unwrap_or(ENOENT)),
         }
     }

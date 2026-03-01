@@ -14,7 +14,7 @@ fn main() {
         return;
     }
     let mountpoint = &args[1];
-    
+
     let backend_path = if args.len() == 3 {
         PathBuf::from(&args[2])
     } else {
@@ -25,10 +25,12 @@ fn main() {
         std_fs::create_dir_all(&backend_path).expect("Failed to create backend directory");
     }
 
-    let options = vec![
-        fuser::MountOption::FSName("vmefs".to_string()),
-    ];
+    let options = vec![fuser::MountOption::FSName("vmefs".to_string())];
 
-    println!("Mounting VmeFS at {} with backend {}", mountpoint, backend_path.display());
+    println!(
+        "Mounting VmeFS at {} with backend {}",
+        mountpoint,
+        backend_path.display()
+    );
     fuser::mount2(VmeFS::new(backend_path), mountpoint, &options).unwrap();
 }

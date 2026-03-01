@@ -1,7 +1,7 @@
+use libc::{EIO, ENOENT};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
-use libc::{EIO, ENOENT};
 
 #[derive(Serialize, Deserialize)]
 pub struct VmeMetadata {
@@ -33,12 +33,13 @@ fn meta_file_path(path: &Path) -> PathBuf {
 
 pub fn create_metadata(path: &Path, metadata: VmeMetadataUpdate) -> Result<(), i32> {
     let name = path
-        .file_name().ok_or(ENOENT)?
+        .file_name()
+        .ok_or(ENOENT)?
         .to_string_lossy()
         .into_owned();
     let vme_file_meta = VmeFileMeta {
         name,
-        metadata: VmeMetadata { 
+        metadata: VmeMetadata {
             size: metadata.size.unwrap_or(0),
             mode: metadata.mode.unwrap_or(0o644),
             uid: metadata.uid.unwrap_or(0),
