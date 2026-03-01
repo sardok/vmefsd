@@ -1,3 +1,5 @@
+use crate::meta;
+
 use fuser::{
     FileAttr, FileType, Filesystem, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty,
     ReplyEntry, ReplyWrite, Request,
@@ -14,14 +16,6 @@ use aes_gcm::{
     Aes256Gcm, Nonce,
 };
 
-use serde::{Deserialize, Serialize};
-
-#[derive(Serialize, Deserialize)]
-pub struct VmeFileMetadata {
-    pub name: String,
-    pub size: u64,
-}
-
 pub struct VmeFS {
     root: PathBuf,
 }
@@ -29,24 +23,6 @@ pub struct VmeFS {
 impl VmeFS {
     pub fn new(root: PathBuf) -> Self {
         Self { root }
-    }
-
-    fn save_metadata(&self, path: &Path, size: u64) -> Result<(), i32> {
-        let name = path
-            .file_name().ok_or(ENOENT)?
-            .to_string_lossy()
-            .into_owned();
-        let vme_metadata = VmeFileMetadata {
-            name,
-            size,
-        };
-
-        let mut meta_path = path.to_path_buf();
-        meta_path.set_extension("meta");
-
-        let f = fs::File::create(meta_path).map_err(|e| e.raw_os_error().unwrap_or(EIO))?;
-        serde_cbor::to_writer(f, &vme_metadata).map_err(|_| EIO)?;
-        Ok(())
     }
 
     fn decrypt(&self, data: &[u8]) -> Result<Vec<u8>, i32> {
@@ -115,26 +91,11 @@ impl VmeFS {
             ino = 1;
         }
 
-        // Try to read size from .meta file
-        let mut meta_path = path.to_path_buf();
-        meta_path.set_extension("meta");
-
-        let size = if let Ok(f) = fs::File::open(meta_path) {
-            if let Ok(vme_metadata) = serde_cbor::from_reader::<VmeFileMetadata, _>(f) {
-                vme_metadata.size
-            } else {
-                let mut s = metadata.size();
-                if kind == FileType::RegularFile && s >= TAG_SIZE as u64 {
-                    s -= TAG_SIZE as u64;
-                }
-                s
-            }
+        // Read size from .meta file, error out if it fails (except for root)
+        let size = if path == self.root {
+            0
         } else {
-            let mut s = metadata.size();
-            if kind == FileType::RegularFile && s >= TAG_SIZE as u64 {
-                s -= TAG_SIZE as u64;
-            }
-            s
+            meta::load_metadata(path).map(|m| m.metadata.size)?
         };
 
         Ok(FileAttr {
@@ -244,7 +205,7 @@ impl Filesystem for VmeFS {
                         reply.error(e.raw_os_error().unwrap_or(ENOENT));
                         return;
                     }
-                    let _ = self.save_metadata(&path, s);
+                    let _ = meta::update_metadata(&path, meta::VmeMetadataUpdate { size: Some(s) });
                 }
                 Err(e) => {
                     reply.error(e);
@@ -412,7 +373,7 @@ impl Filesystem for VmeFS {
             Ok(new_encrypted_content) => {
                 match fs::write(&path, new_encrypted_content) {
                     Ok(_) => {
-                        let _ = self.save_metadata(&path, content.len() as u64);
+                        let _ = meta::update_metadata(&path, meta::VmeMetadataUpdate { size: Some(content.len() as u64) });
                         reply.written(data.len() as u32)
                     },
                     Err(e) => reply.error(e.raw_os_error().unwrap_or(ENOENT)),
@@ -443,7 +404,7 @@ impl Filesystem for VmeFS {
         
         match fs::File::create(&child_path) {
             Ok(_) => {
-                let _ = self.save_metadata(&child_path, 0);
+                let _ = meta::create_metadata(&child_path, meta::VmeMetadataUpdate { size: Some(0) });
                 match self.get_attr(&child_path) {
                     Ok(attr) => reply.created(&TTL, &attr, 0, 0, 0),
                     Err(e) => reply.error(e),
@@ -465,8 +426,7 @@ impl Filesystem for VmeFS {
         
         match fs::create_dir(&child_path) {
             Ok(_) => {
-                let size = fs::metadata(&child_path).map(|m| m.size()).unwrap_or(0);
-                let _ = self.save_metadata(&child_path, size);
+                let _ = meta::create_metadata(&child_path, Default::default());
                 match self.get_attr(&child_path) {
                     Ok(attr) => reply.entry(&TTL, &attr, 0),
                     Err(e) => reply.error(e),
@@ -488,9 +448,7 @@ impl Filesystem for VmeFS {
         
         match fs::remove_file(&child_path) {
             Ok(_) => {
-                let mut meta_path = child_path.clone();
-                meta_path.set_extension("meta");
-                let _ = fs::remove_file(meta_path);
+                let _ = meta::remove_metadata(&child_path);
                 reply.ok()
             },
             Err(e) => reply.error(e.raw_os_error().unwrap_or(ENOENT)),
@@ -509,9 +467,7 @@ impl Filesystem for VmeFS {
         
         match fs::remove_dir(&child_path) {
             Ok(_) => {
-                let mut meta_path = child_path.clone();
-                meta_path.set_extension("meta");
-                let _ = fs::remove_file(meta_path);
+                let _  = meta::remove_metadata(&child_path);
                 reply.ok()
             },
             Err(e) => reply.error(e.raw_os_error().unwrap_or(ENOENT)),

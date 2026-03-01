@@ -1,4 +1,5 @@
 mod fs;
+mod meta;
 
 use fs::VmeFS;
 use std::env;
