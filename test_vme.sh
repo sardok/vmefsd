@@ -43,6 +43,17 @@ mkdir "$MOUNTPOINT/subdir"
 echo "Inside subdir" > "$MOUNTPOINT/subdir/subtest.txt"
 ls -R "$MOUNTPOINT"
 
+echo "Testing mode (chmod)..."
+# Set specific mode
+chmod 600 "$MOUNTPOINT/test.txt"
+MODE=$(stat -c "%a" "$MOUNTPOINT/test.txt")
+if [ "$MODE" = "600" ]; then
+    echo "OK: chmod 600 successful on mountpoint"
+else
+    echo "ERROR: chmod failed, mode is $MODE"
+    exit 1
+fi
+
 echo "Verifying backend (should be encrypted and have .meta files)..."
 ls -R "$BACKEND"
 

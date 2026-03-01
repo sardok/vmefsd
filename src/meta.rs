@@ -6,11 +6,13 @@ use libc::{EIO, ENOENT};
 #[derive(Serialize, Deserialize)]
 pub struct VmeMetadata {
     pub size: u64,
+    pub mode: u32,
 }
 
-#[derive(Default)]
+#[derive(Default, PartialEq)]
 pub struct VmeMetadataUpdate {
     pub size: Option<u64>,
+    pub mode: Option<u32>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -32,7 +34,10 @@ pub fn create_metadata(path: &Path, metadata: VmeMetadataUpdate) -> Result<(), i
         .into_owned();
     let vme_file_meta = VmeFileMeta {
         name,
-        metadata: VmeMetadata { size: metadata.size.unwrap_or(0) },
+        metadata: VmeMetadata {
+            size: metadata.size.unwrap_or(0),
+            mode: metadata.mode.unwrap_or(0o644),
+        },
     };
 
     let meta_path = meta_file_path(path);
@@ -46,6 +51,9 @@ pub fn update_metadata(path: &Path, update: VmeMetadataUpdate) -> Result<(), i32
     let mut metadata = load_metadata(path)?;
     if let Some(size) = update.size {
         metadata.metadata.size = size;
+    }
+    if let Some(mode) = update.mode {
+        metadata.metadata.mode = mode;
     }
 
     let meta_path = meta_file_path(path);
