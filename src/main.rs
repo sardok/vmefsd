@@ -1,5 +1,6 @@
 mod fs;
 mod meta;
+mod client;
 
 use fs::VmeFS;
 use std::env;
