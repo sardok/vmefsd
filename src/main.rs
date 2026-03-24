@@ -1,11 +1,16 @@
-mod fs;
-mod meta;
-mod client;
-
-use fs::VmeFS;
 use std::env;
 use std::fs as std_fs;
 use std::path::PathBuf;
+
+use fs::VmeFS;
+
+mod client;
+mod crypto;
+mod error;
+mod fs;
+mod meta;
+
+type Result<T> = std::result::Result<T, error::Error>;
 
 fn main() {
     env_logger::init();
@@ -33,5 +38,8 @@ fn main() {
         mountpoint,
         backend_path.display()
     );
-    fuser::mount2(VmeFS::new(backend_path), mountpoint, &options).unwrap();
+    let Ok(client) = client::VmeClient::new(u32::MAX) else {
+        panic!("Unable to connect to {}", u32::MAX);
+    };
+    fuser::mount2(VmeFS::new(backend_path, client), mountpoint, &options).unwrap();
 }

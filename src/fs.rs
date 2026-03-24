@@ -1,10 +1,3 @@
-use crate::meta;
-
-use fuser::{
-    FileAttr, FileType, Filesystem, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty,
-    ReplyEntry, ReplyWrite, Request,
-};
-use libc::{EINVAL, EIO, ENOENT};
 use std::ffi::OsStr;
 use std::fs;
 use std::os::unix::fs::MetadataExt;
@@ -13,34 +6,51 @@ use std::time::{Duration, SystemTime};
 
 use aes_gcm::{
     aead::{Aead, KeyInit},
-    Aes256Gcm, Nonce,
 };
+use fortanix_vme_abi::fs::FsOpResponse;
+use fuser::{
+    FileAttr, FileType, Filesystem, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty,
+    ReplyEntry, ReplyWrite, Request,
+};
+use libc::{EINVAL, EIO, ENOENT};
+
+use crate::crypto::EncryptedMetaFile;
+use crate::meta::{self, MetaFile, Metadata};
+use crate::client::VmeClient;
+
+macro_rules! to_string_or_reply_err {
+    ($name:expr, $reply:expr) => {
+        match $name.to_str() {
+            Some(name) => name.to_owned(),
+            None => {
+                $reply.error(EINVAL);
+                return;
+            }
+        }
+    };
+}
+
+macro_rules! try_into_or_reply_err {
+    ($obj:expr, $reply:expr) => {
+        match $obj.try_into() {
+            Ok(obj) => obj,
+            Err(err) => {
+                log::error!("Conversion failed for {}, error: {}", stringify!($obj), err);
+                $reply.error(EINVAL);
+                return;
+            }
+        }
+    };
+}
 
 pub struct VmeFS {
     root: PathBuf,
+    client: VmeClient,
 }
 
 impl VmeFS {
-    pub fn new(root: PathBuf) -> Self {
-        Self { root }
-    }
-
-    fn decrypt(&self, data: &[u8]) -> Result<Vec<u8>, i32> {
-        if data.is_empty() {
-            return Ok(Vec::new());
-        }
-        if data.len() < TAG_SIZE {
-            return Err(EINVAL);
-        }
-        let cipher = Aes256Gcm::new(STATIC_KEY.into());
-        let nonce = Nonce::from_slice(STATIC_NONCE);
-        cipher.decrypt(nonce, data).map_err(|_| EIO)
-    }
-
-    fn encrypt(&self, data: &[u8]) -> Result<Vec<u8>, i32> {
-        let cipher = Aes256Gcm::new(STATIC_KEY.into());
-        let nonce = Nonce::from_slice(STATIC_NONCE);
-        cipher.encrypt(nonce, data).map_err(|_| EIO)
+    pub fn new(root: PathBuf, client: VmeClient) -> Self {
+        Self { root, client }
     }
 
     fn find_path_by_ino(&self, target_ino: u64) -> Option<PathBuf> {
@@ -191,7 +201,7 @@ impl Filesystem for VmeFS {
             }
         };
 
-        let metadata_update = meta::VmeMetadataUpdate {
+        let metadata_update = meta::MetadataUpdate {
             size,
             mode,
             uid,
@@ -381,7 +391,7 @@ impl Filesystem for VmeFS {
         match self.encrypt(&content) {
             Ok(encrypted) => match fs::write(&path, encrypted) {
                 Ok(_) => {
-                    let update = meta::VmeMetadataUpdate {
+                    let update = meta::MetadataUpdate {
                         size: Some(content.len() as u64),
                         ..Default::default()
                     };
@@ -404,6 +414,21 @@ impl Filesystem for VmeFS {
         _flags: i32,
         reply: ReplyCreate,
     ) {
+
+        let name_str = to_string_or_reply_err!(name, reply);
+        let meta_file = meta::MetaFile {
+            name: name_str.clone(),
+            metadata: Metadata {
+                size: 0,
+                mode: mode & !umask,
+                uid: req.uid(),
+                gid: req.gid(),
+            }
+        };
+
+        let encrypted_meta_file: EncryptedMetaFile = try_into_or_reply_err!(meta_file, reply);
+        let response = self.client.create(parent, encrypted_meta_file)?;
+
         let parent_path = match self.find_path_by_ino(parent) {
             Some(p) => p,
             None => {
@@ -411,13 +436,13 @@ impl Filesystem for VmeFS {
                 return;
             }
         };
-        let child_path = parent_path.join(name);
+        let child_path = parent_path.join(name_str);
 
         match fs::File::create(&child_path) {
             Ok(_) => {
                 let _ = meta::create_metadata(
                     &child_path,
-                    meta::VmeMetadataUpdate {
+                    meta::MetadataUpdate {
                         size: Some(0),
                         mode: Some(mode & !umask),
                         uid: Some(req.uid()),
@@ -455,7 +480,7 @@ impl Filesystem for VmeFS {
             Ok(_) => {
                 let _ = meta::create_metadata(
                     &child_path,
-                    meta::VmeMetadataUpdate {
+                    meta::MetadataUpdate {
                         size: Some(0),
                         mode: Some(mode & !umask),
                         uid: Some(req.uid()),
