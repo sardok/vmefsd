@@ -12,6 +12,7 @@ use crate::error::Error;
 const STATIC_KEY: &[u8; 32] = b"static_encryption_key_32_bytes!!";
 const STATIC_NONCE: &[u8; 12] = b"static_nonce";
 
+
 pub fn encrypt(data: &[u8]) -> Result<Vec<u8>, Error> {
     let cipher = Aes256Gcm::new(STATIC_KEY.into());
     let nonce = Nonce::from_slice(STATIC_NONCE);
@@ -28,6 +29,11 @@ pub fn decrypt(data: &[u8]) -> Result<Vec<u8>, Error> {
         .decrypt(nonce, data)
         .map_err(|e| Error::CryptoError(e.to_string()))?;
     Ok(decrypted)
+}
+
+pub fn encrypt_name(name: &str) -> Result<String, Error> {
+    let encrypted = encrypt(name.as_bytes())?;
+    Ok(general_purpose::STANDARD_NO_PAD.encode(encrypted))
 }
 
 // This type is identical to MetaFile

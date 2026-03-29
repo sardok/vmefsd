@@ -42,6 +42,16 @@ impl VmeClient {
         self.send_recv(&op_req)
     }
 
+    pub fn getattr(&mut self, ino: u64) -> Result<FsOpResponse> {
+        let op_req = FsOpRequest::GetAttr { ino };
+        self.send_recv(&op_req)
+    }
+
+    pub fn lookup(&mut self, ino: u64, name: String) -> Result<FsOpResponse> {
+        let op_req = FsOpRequest::Lookup { ino, name };
+        self.send_recv(&op_req)
+    }
+
     fn send_recv(&mut self, payload: &FsOpRequest) -> Result<FsOpResponse> {
         let payload = serde_cbor::to_vec(payload)?;
         self.stream.write_all(&payload)?;

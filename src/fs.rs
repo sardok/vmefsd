@@ -176,33 +176,54 @@ impl VmeFS {
 
     fn read_impl(&mut self, ino: u64) -> Result<Vec<u8>> {
         let FsOpResponse::FileContent { content } = self.client.read(ino)? else {
-            return err(Error::AbiError("FileContent response expected"));
+            return Err(Error::AbiError("FileContent response expected"));
         };
         crypto::decrypt(&content)
+    }
+
+    fn getattr_impl(&mut self, ino: u64) -> Result<FileAttr> {
+        let FsOpResponse::GetAttr { entry } = self.client.getattr(ino)? else {
+            return Err(Error::AbiError("GetAttr response expected"));
+        };
+        let host_metadata = entry.host_metadata.clone();
+        let metafile: MetaFile = entry.try_into()?;
+        metafile.to_file_attr(host_metadata)
+    }
+
+    fn lookup_impl(&mut self, parent: u64, name: &str) -> Result<FileAttr> {
+        let encrypted_name = crypto::encrypt_name(name)?;
+        let FsOpResponse::GetAttr { entry } = self.client.lookup(parent, encrypted_name)? else {
+            return Err(Error::AbiError("GetAttr response expected"));
+        };
+        let host_metadata = entry.host_metadata.clone();
+        let metafile: MetaFile = entry.try_into()?;
+        metafile.to_file_attr(host_metadata)
     }
 
     fn readdir_impl(&mut self, ino: u64) -> Result<Vec<ReaddirEntry>> {
         let FsOpResponse::ReadDir { entries } = self.client.readdir(ino)? else {
             return Err(Error::AbiError("ReadDir response expected"));
         };
-        let dirs = Vec::with_capacity(entries.len() + 2);
+        let mut dirs = Vec::with_capacity(entries.len() + 2);
 
-        // Add . and ..
-        dirs.push(ReaddirEntry {
-            name: ".".to_string(),
-            ino: metadata.ino(),
-            kind: FileType::Directory,
-        });
-        // For simplicity, we use current dir metadata for ..
-        dirs.push(ReaddirEntry {
-            name: "..".to_string(),
-            ino: metadata.ino(),
-            kind: FileType::Directory,
-        });
         for entry in entries {
             let host_metadata = entry.host_metadata.clone();
             let metafile: MetaFile = entry.try_into()?;
             let attr = metafile.to_file_attr(host_metadata)?;
+
+            if attr.ino == ino {
+                // Add . and ..
+                dirs.push(ReaddirEntry {
+                    name: ".".to_string(),
+                    ino,
+                    kind: FileType::Directory,
+                });
+                dirs.push(ReaddirEntry {
+                    name: "..".to_string(),
+                    ino,
+                    kind: FileType::Directory,
+                });
+            }
 
             dirs.push(ReaddirEntry {
                 name: metafile.name,
@@ -229,37 +250,24 @@ impl Filesystem for VmeFS {
             reply.error(ENOENT);
             return;
         }
-        let parent_path = match self.find_path_by_ino(parent) {
-            Some(p) => p,
-            None => {
-                reply.error(ENOENT);
-                return;
-            }
-        };
-        let child_path = parent_path.join(name);
+        let name_str = to_string_or_reply_err!(name, reply);
 
-        if child_path.exists() {
-            match self.get_attr(&child_path) {
-                Ok(attr) => reply.entry(&TTL, &attr, 0),
-                Err(e) => reply.error(e),
+        match self.lookup_impl(parent, &name_str) {
+            Ok(attr) => reply.entry(&TTL, &attr, 0),
+            Err(e) => {
+                log::error!("lookup failed for name {}: {:?}", name_str, e);
+                reply.error(ENOENT);
             }
-        } else {
-            reply.error(ENOENT);
         }
     }
 
     fn getattr(&mut self, _req: &Request, ino: u64, reply: ReplyAttr) {
-        let path = match self.find_path_by_ino(ino) {
-            Some(p) => p,
-            None => {
-                reply.error(ENOENT);
-                return;
-            }
-        };
-
-        match self.get_attr(&path) {
+        match self.getattr_impl(ino) {
             Ok(attr) => reply.attr(&TTL, &attr),
-            Err(e) => reply.error(e),
+            Err(e) => {
+                log::error!("getattr failed for ino {}: {:?}", ino, e);
+                reply.error(ENOENT);
+            }
         }
     }
 
@@ -337,61 +345,10 @@ impl Filesystem for VmeFS {
         offset: i64,
         mut reply: ReplyDirectory,
     ) {
-        let path = match self.find_path_by_ino(ino) {
-            Some(p) => p,
-            None => {
-                reply.error(ENOENT);
-                return;
-            }
-        };
-
-        let mut entries = Vec::new();
-
-        // Add . and ..
-        if let Ok(metadata) = fs::metadata(&path) {
-            entries.push(ReaddirEntry {
-                name: ".".to_string(),
-                ino: metadata.ino(),
-                kind: FileType::Directory,
-            });
-            // For simplicity, we use current dir metadata for ..
-            entries.push(ReaddirEntry {
-                name: "..".to_string(),
-                ino: metadata.ino(),
-                kind: FileType::Directory,
-            });
-        }
-
-        if let Ok(dir) = fs::read_dir(&path) {
-            for entry in dir.flatten() {
-                let file_name = entry.file_name().to_string_lossy().into_owned();
-                if file_name.ends_with(".meta") {
-                    continue;
-                }
-                if let Ok(metadata) = entry.metadata() {
-                    let kind = if metadata.is_dir() {
-                        FileType::Directory
-                    } else {
-                        FileType::RegularFile
-                    };
-                    entries.push(ReaddirEntry {
-                        name: file_name,
-                        ino: metadata.ino(),
-                        kind,
-                    });
-                }
-            }
-        }
-
-        for (i, entry) in entries.into_iter().enumerate().skip(offset as usize) {
-            let mut ent_ino = entry.ino;
-            if entry.name == "." || (entry.name == ".." && path == self.root) {
-                if path == self.root {
-                    ent_ino = 1;
-                }
-            }
-
-            if reply.add(ent_ino, (i + 1) as i64, entry.kind, &entry.name) {
+        let entries = self.readdir_impl(ino).expect("read_impl");
+        let offset = offset as usize;
+        for (i, entry) in entries.into_iter().enumerate().skip(offset) {
+            if reply.add(entry.ino, (i + 1) as i64, entry.kind, &entry.name) {
                 break;
             }
         }
