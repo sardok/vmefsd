@@ -10,6 +10,8 @@ pub enum Error {
     CryptoError(String),
     #[error("Serde cbor error")]
     CborError(#[from] SerdeCborError),
+    #[error("ABI error: {0}")]
+    AbiError(&'static str),
 }
 
 impl From<AesError> for Error {

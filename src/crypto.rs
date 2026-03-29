@@ -3,6 +3,7 @@ use aes_gcm::{
     Aes256Gcm, Nonce,
 };
 use base64::{engine::general_purpose, Engine as _};
+use fortanix_vme_abi::fs::FsEntry;
 use serde::{Deserialize, Serialize};
 
 use crate::meta::MetaFile;
@@ -10,6 +11,24 @@ use crate::error::Error;
 
 const STATIC_KEY: &[u8; 32] = b"static_encryption_key_32_bytes!!";
 const STATIC_NONCE: &[u8; 12] = b"static_nonce";
+
+pub fn encrypt(data: &[u8]) -> Result<Vec<u8>, Error> {
+    let cipher = Aes256Gcm::new(STATIC_KEY.into());
+    let nonce = Nonce::from_slice(STATIC_NONCE);
+    let encrypted = cipher
+        .encrypt(nonce, data)
+        .map_err(|e| Error::CryptoError(e.to_string()))?;
+    Ok(encrypted)
+}
+
+pub fn decrypt(data: &[u8]) -> Result<Vec<u8>, Error> {
+    let cipher = Aes256Gcm::new(STATIC_KEY.into());
+    let nonce = Nonce::from_slice(STATIC_NONCE);
+    let decrypted = cipher
+        .decrypt(nonce, data)
+        .map_err(|e| Error::CryptoError(e.to_string()))?;
+    Ok(decrypted)
+}
 
 // This type is identical to MetaFile
 // except the fact that all plaintext information
@@ -59,6 +78,16 @@ impl TryFrom<EncryptedMetaFile> for MetaFile {
         let meta: MetaFile = serde_cbor::from_slice(&decrypted_metadata)?;
 
         Ok(meta)
+    }
+}
+
+impl TryFrom<FsEntry> for MetaFile {
+    type Error = Error;
+
+    fn try_from(value: FsEntry) -> Result<Self, Self::Error> {
+        let encrypted: EncryptedMetaFile = serde_cbor::from_slice(&value.metadata)?;
+        let metafile: MetaFile = encrypted.try_into()?;
+        Ok(metafile)
     }
 }
 

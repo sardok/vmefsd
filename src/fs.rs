@@ -4,9 +4,6 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use aes_gcm::{
-    aead::{Aead, KeyInit},
-};
 use fortanix_vme_abi::fs::FsOpResponse;
 use fuser::{
     FileAttr, FileType, Filesystem, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty,
@@ -14,7 +11,9 @@ use fuser::{
 };
 use libc::{EINVAL, EIO, ENOENT};
 
-use crate::crypto::EncryptedMetaFile;
+use crate::Result;
+use crate::crypto::{self, EncryptedMetaFile};
+use crate::error::Error;
 use crate::meta::{self, MetaFile, Metadata};
 use crate::client::VmeClient;
 
@@ -37,6 +36,23 @@ macro_rules! try_into_or_reply_err {
             Err(err) => {
                 log::error!("Conversion failed for {}, error: {}", stringify!($obj), err);
                 $reply.error(EINVAL);
+                return;
+            }
+        }
+    };
+}
+
+macro_rules! client_op_or_reply_err {
+    ($self:expr, $op:ident, ($($arg:expr),*), $reply:expr, $variant:ident) => {
+        match $self.client.$op($($arg),*) {
+            Ok(FsOpResponse::$variant { entry }) => entry,
+            Ok(_) => {
+                $reply.error(EINVAL);
+                return;
+            }
+            Err(e) => {
+                log::error!("Client {} failed: {:?}", stringify!($op), e);
+                $reply.error(EIO);
                 return;
             }
         }
@@ -128,12 +144,84 @@ impl VmeFS {
             blksize: metadata.blksize() as u32,
         })
     }
+
+    fn create_impl(
+        &mut self,
+        req: &Request,
+        parent: u64,
+        name: String,
+        mode: u32,
+        umask: u32
+    ) -> Result<FileAttr> {
+
+        let metafile = MetaFile {
+            name: name,
+            metadata: Metadata {
+                size: 0,
+                mode: mode & !umask,
+                uid: req.uid(),
+                gid: req.gid(),
+            }
+        };
+
+        let encrypted: EncryptedMetaFile = metafile.try_into()?;
+        let FsOpResponse::GetAttr { entry } = self.client.create(parent, encrypted)? else {
+            return Err(Error::AbiError("GetAttr response expected"));
+        };
+        let host_metadata = entry.host_metadata.clone();
+        let metafile: MetaFile = entry.try_into()?;
+        let attr = metafile.to_file_attr(host_metadata)?;
+        Ok(attr)
+    }
+
+    fn read_impl(&mut self, ino: u64) -> Result<Vec<u8>> {
+        let FsOpResponse::FileContent { content } = self.client.read(ino)? else {
+            return err(Error::AbiError("FileContent response expected"));
+        };
+        crypto::decrypt(&content)
+    }
+
+    fn readdir_impl(&mut self, ino: u64) -> Result<Vec<ReaddirEntry>> {
+        let FsOpResponse::ReadDir { entries } = self.client.readdir(ino)? else {
+            return Err(Error::AbiError("ReadDir response expected"));
+        };
+        let dirs = Vec::with_capacity(entries.len() + 2);
+
+        // Add . and ..
+        dirs.push(ReaddirEntry {
+            name: ".".to_string(),
+            ino: metadata.ino(),
+            kind: FileType::Directory,
+        });
+        // For simplicity, we use current dir metadata for ..
+        dirs.push(ReaddirEntry {
+            name: "..".to_string(),
+            ino: metadata.ino(),
+            kind: FileType::Directory,
+        });
+        for entry in entries {
+            let host_metadata = entry.host_metadata.clone();
+            let metafile: MetaFile = entry.try_into()?;
+            let attr = metafile.to_file_attr(host_metadata)?;
+
+            dirs.push(ReaddirEntry {
+                name: metafile.name,
+                ino: attr.ino,
+                kind: attr.kind,
+            });
+        }
+
+        Ok(dirs)
+    }
 }
 
-const STATIC_KEY: &[u8; 32] = b"static_encryption_key_32_bytes!!";
-const STATIC_NONCE: &[u8; 12] = b"static_nonce";
-const TAG_SIZE: usize = 16;
 const TTL: Duration = Duration::from_secs(1); // 1 second attribute cache
+
+struct ReaddirEntry {
+    name: String,
+    ino: u64,
+    kind: FileType,
+}
 
 impl Filesystem for VmeFS {
     fn lookup(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: ReplyEntry) {
@@ -209,15 +297,15 @@ impl Filesystem for VmeFS {
         };
         if let Some(s) = size {
             let encrypted_content = fs::read(&path).unwrap_or_default();
-            let mut content = match self.decrypt(&encrypted_content) {
+            let mut content = match crypto::decrypt(&encrypted_content) {
                 Ok(c) => c,
                 Err(e) => {
-                    reply.error(e);
+                    reply.error(EIO);
                     return;
                 }
             };
             content.resize(s as usize, 0);
-            match self.encrypt(&content) {
+            match crypto::encrypt(&content) {
                 Ok(encrypted) => {
                     if let Err(e) = fs::write(&path, encrypted) {
                         reply.error(e.raw_os_error().unwrap_or(ENOENT));
@@ -225,7 +313,7 @@ impl Filesystem for VmeFS {
                     }
                 }
                 Err(e) => {
-                    reply.error(e);
+                    reply.error(EIO);
                     return;
                 }
             }
@@ -256,12 +344,6 @@ impl Filesystem for VmeFS {
                 return;
             }
         };
-
-        struct ReaddirEntry {
-            name: String,
-            ino: u64,
-            kind: FileType,
-        }
 
         let mut entries = Vec::new();
 
@@ -327,28 +409,14 @@ impl Filesystem for VmeFS {
         _lock: Option<u64>,
         reply: ReplyData,
     ) {
-        let path = match self.find_path_by_ino(ino) {
-            Some(p) => p,
-            None => {
-                reply.error(ENOENT);
-                return;
-            }
-        };
-
-        match fs::read(&path) {
-            Ok(encrypted_content) => match self.decrypt(&encrypted_content) {
-                Ok(content) => {
-                    let offset = offset as usize;
-                    if offset < content.len() {
-                        let end = std::cmp::min(offset + size as usize, content.len());
-                        reply.data(&content[offset..end]);
-                    } else {
-                        reply.data(&[]);
-                    }
-                }
-                Err(e) => reply.error(e),
-            },
-            Err(e) => reply.error(e.raw_os_error().unwrap_or(ENOENT)),
+        let content = self.read_impl(ino).expect("read_impl");
+        let offset = offset as usize;
+        let size = size as usize;
+        if offset < content.len() {
+            let end = std::cmp::min(offset + size, content.len());
+            reply.data(&content[offset..end]);
+        } else {
+            reply.data(&[]);
         }
     }
 
@@ -414,48 +482,9 @@ impl Filesystem for VmeFS {
         _flags: i32,
         reply: ReplyCreate,
     ) {
-
         let name_str = to_string_or_reply_err!(name, reply);
-        let meta_file = meta::MetaFile {
-            name: name_str.clone(),
-            metadata: Metadata {
-                size: 0,
-                mode: mode & !umask,
-                uid: req.uid(),
-                gid: req.gid(),
-            }
-        };
-
-        let encrypted_meta_file: EncryptedMetaFile = try_into_or_reply_err!(meta_file, reply);
-        let response = self.client.create(parent, encrypted_meta_file)?;
-
-        let parent_path = match self.find_path_by_ino(parent) {
-            Some(p) => p,
-            None => {
-                reply.error(ENOENT);
-                return;
-            }
-        };
-        let child_path = parent_path.join(name_str);
-
-        match fs::File::create(&child_path) {
-            Ok(_) => {
-                let _ = meta::create_metadata(
-                    &child_path,
-                    meta::MetadataUpdate {
-                        size: Some(0),
-                        mode: Some(mode & !umask),
-                        uid: Some(req.uid()),
-                        gid: Some(req.gid()),
-                    },
-                );
-                match self.get_attr(&child_path) {
-                    Ok(attr) => reply.created(&TTL, &attr, 0, 0, 0),
-                    Err(e) => reply.error(e),
-                }
-            }
-            Err(e) => reply.error(e.raw_os_error().unwrap_or(ENOENT)),
-        }
+        let attr = self.create_impl(req, parent, name_str, mode, umask).expect("create impl");
+        reply.created(&TTL, &attr, 0, 0, 0);
     }
 
     fn mkdir(

@@ -1,7 +1,13 @@
-use libc::{EIO, ENOENT};
-use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
+
+use fortanix_vme_abi::fs::{HostMetadata, FileType as AbiFileType};
+use fuser::FileAttr;
+use libc::{EIO, ENOENT};
+use serde::{Deserialize, Serialize};
+
+use crate::Result;
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
 pub struct Metadata {
@@ -30,6 +36,48 @@ pub struct MetaFile {
 
     // Metadata of the source file
     pub metadata: Metadata,
+}
+
+impl MetaFile {
+    pub fn to_file_attr(&self, host_metadata: HostMetadata) -> Result<FileAttr> {
+        let HostMetadata {
+            blocks, ino, kind, nlink, rdev, atime, mtime, ctime,
+        } = host_metadata;
+        let kind = match kind {
+            AbiFileType::Directory => fuser::FileType::Directory,
+            AbiFileType::RegularFile => fuser::FileType::RegularFile,
+            AbiFileType::Symlink => fuser::FileType::Symlink,
+        };
+
+        let Self {
+            name: _,
+            metadata,
+        } = self;
+        let Metadata {
+            size,
+            mode,
+            uid,
+            gid,
+        } = *metadata;
+
+        Ok(FileAttr {
+            ino,
+            size,
+            blocks,
+            atime: SystemTime::UNIX_EPOCH + Duration::from_secs(atime),
+            mtime: SystemTime::UNIX_EPOCH + Duration::from_secs(mtime),
+            ctime: SystemTime::UNIX_EPOCH + Duration::from_secs(ctime),
+            crtime: SystemTime::UNIX_EPOCH + Duration::from_secs(ctime),
+            kind,
+            perm: mode as u16,
+            nlink,
+            uid,
+            gid,
+            rdev,
+            flags: 0,
+            blksize: 4096,
+        })
+    }
 }
 
 fn meta_file_path(path: &Path) -> PathBuf {

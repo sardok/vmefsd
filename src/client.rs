@@ -32,8 +32,17 @@ impl VmeClient {
         self.send_recv(&op_req)
     }
 
-    fn send_recv(&mut self, payload: &FsOpRequest) -> Result<FsOpResponse>
-    {
+    pub fn read(&mut self, ino: u64) -> Result<FsOpResponse> {
+        let op_req = FsOpRequest::Read { ino };
+        self.send_recv(&op_req)
+    }
+
+    pub fn readdir(&mut self, ino: u64) -> Result<FsOpResponse> {
+        let op_req = FsOpRequest::ReadDir { ino };
+        self.send_recv(&op_req)
+    }
+
+    fn send_recv(&mut self, payload: &FsOpRequest) -> Result<FsOpResponse> {
         let payload = serde_cbor::to_vec(payload)?;
         self.stream.write_all(&payload)?;
         let resp = serde_cbor::from_reader(&mut self.stream)?;
