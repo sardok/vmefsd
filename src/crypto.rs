@@ -111,6 +111,9 @@ mod tests {
                 mode: 0o644,
                 uid: 1000,
                 gid: 1000,
+                atime: None,
+                mtime: None,
+                ctime: None,
             },
         };
 

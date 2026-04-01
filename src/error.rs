@@ -4,14 +4,14 @@ use serde_cbor::Error as SerdeCborError;
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
-    #[error("Vsock error")]
-    VsockError(#[from] IoError),
-    #[error("Crypto error: {0}")]
-    CryptoError(String),
-    #[error("Serde cbor error")]
-    CborError(#[from] SerdeCborError),
     #[error("ABI error: {0}")]
     AbiError(&'static str),
+    #[error("Serde cbor error")]
+    CborError(#[from] SerdeCborError),
+    #[error("Crypto error: {0}")]
+    CryptoError(String),
+    #[error("Vsock error")]
+    VsockError(#[from] IoError),
 }
 
 impl From<AesError> for Error {

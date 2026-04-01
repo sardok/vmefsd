@@ -7,6 +7,7 @@ use fs::VmeFS;
 mod client;
 mod crypto;
 mod error;
+mod extensions;
 mod fs;
 mod meta;
 
@@ -41,5 +42,5 @@ fn main() {
     let Ok(client) = client::VmeClient::new(u32::MAX) else {
         panic!("Unable to connect to {}", u32::MAX);
     };
-    fuser::mount2(VmeFS::new(backend_path, client), mountpoint, &options).unwrap();
+    fuser::mount2(VmeFS::new(client), mountpoint, &options).unwrap();
 }
