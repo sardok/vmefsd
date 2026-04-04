@@ -18,7 +18,7 @@ impl VmeClient {
         Ok(Self { stream })
     }
 
-    pub fn create(&mut self, parent: u64, encrypted_meta_file: EncryptedMetaFile) -> Result<FsOpResponse> {
+    pub fn create(&mut self, parent: u64, encrypted_meta_file: EncryptedMetaFile, flags: i32) -> Result<FsOpResponse> {
         let EncryptedMetaFile {
             name,
             metadata,
@@ -27,6 +27,7 @@ impl VmeClient {
             parent,
             name,
             metadata,
+            flags,
         };
 
         self.send_recv(&op_req)
@@ -37,8 +38,8 @@ impl VmeClient {
         self.send_recv(&op_req)
     }
 
-    pub fn write(&mut self, ino: u64, content: Vec<u8>) -> Result<FsOpResponse> {
-        let op_req = FsOpRequest::Write { ino, content };
+    pub fn write(&mut self, ino: u64, content: Vec<u8>, flags: i32) -> Result<FsOpResponse> {
+        let op_req = FsOpRequest::Write { ino, content, flags };
         self.send_recv(&op_req)
     }
 

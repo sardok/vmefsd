@@ -33,11 +33,11 @@ macro_rules! to_string_or_reply_err {
     };
 }
 
-pub struct VmeFS {
+pub struct VmeFs {
     client: VmeClient,
 }
 
-impl VmeFS {
+impl VmeFs {
     pub fn new(client: VmeClient) -> Self {
         Self { client }
     }
@@ -48,7 +48,8 @@ impl VmeFS {
         parent: u64,
         name: String,
         mode: u32,
-        umask: u32
+        umask: u32,
+        flags: i32
     ) -> Result<FileAttr> {
 
         let metafile = MetaFile {
@@ -65,7 +66,7 @@ impl VmeFS {
         };
 
         let encrypted: EncryptedMetaFile = metafile.try_into()?;
-        let FsOpResponse::GetAttr { entry } = self.client.create(parent, encrypted)? else {
+        let FsOpResponse::GetAttr { entry } = self.client.create(parent, encrypted, flags)? else {
             return Err(Error::AbiError("GetAttr response expected"));
         };
         let host_metadata = entry.host_metadata.clone();
@@ -113,15 +114,22 @@ impl VmeFS {
         crypto::decrypt(&content)
     }
 
-    fn write_impl(&mut self, ino: u64, offset: u64, data: &[u8]) -> Result<usize> {
+    fn write_impl(&mut self, ino: u64, mut offset: u64, data: &[u8], flags: i32) -> Result<usize> {
         let mut content = self.read_impl(ino)?;
+        let mut flags = flags;
+        if flags & libc::O_APPEND != 0 {
+            offset = content.len() as u64;
+            // Host ignores, but clear it anyway
+            flags &= !libc::O_APPEND;
+        }
+
         let offset = offset as usize;
         if offset + data.len() > content.len() {
             content.resize(offset + data.len(), 0);
         }
         content[offset..offset + data.len()].copy_from_slice(data);
         let encrypted = crypto::encrypt(&content)?;
-        match self.client.write(ino, encrypted)? {
+        match self.client.write(ino, encrypted, flags)? {
             FsOpResponse::Empty => Ok(data.len()),
             _ => Err(Error::AbiError("Empty response expected")),
         }
@@ -221,7 +229,7 @@ struct ReaddirEntry {
     kind: FileType,
 }
 
-impl Filesystem for VmeFS {
+impl Filesystem for VmeFs {
     fn lookup(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: ReplyEntry) {
         if name.to_string_lossy().ends_with(".meta") {
             reply.error(ENOENT);
@@ -358,11 +366,11 @@ impl Filesystem for VmeFS {
         offset: i64,
         data: &[u8],
         _write_flags: u32,
-        _flags: i32,
+        flags: i32,
         _lock: Option<u64>,
         reply: ReplyWrite,
     ) {
-        match self.write_impl(ino, offset as u64, data) {
+        match self.write_impl(ino, offset as u64, data, flags) {
             Ok(written) => reply.written(written as u32),
             Err(e) => {
                 log::error!("write failed for ino {}: {:?}", ino, e);
@@ -378,12 +386,17 @@ impl Filesystem for VmeFS {
         name: &OsStr,
         mode: u32,
         umask: u32,
-        _flags: i32,
+        flags: i32,
         reply: ReplyCreate,
     ) {
         let name_str = to_string_or_reply_err!(name, reply);
-        let attr = self.create_impl(req, parent, name_str, mode, umask).expect("create impl");
-        reply.created(&TTL, &attr, 0, 0, 0);
+        match self.create_impl(req, parent, name_str, mode, umask, flags) {
+            Ok(attr) => reply.created(&TTL, &attr, 0, 0, 0),
+            Err(e) => {
+                log::error!("create failed: {:?}", e);
+                reply.error(EIO);
+            }
+        }
     }
 
     fn mkdir(

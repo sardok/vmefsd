@@ -2,13 +2,13 @@ use std::env;
 use std::fs as std_fs;
 use std::path::PathBuf;
 
-use fs::VmeFS;
+use vmefs::VmeFs;
 
 mod client;
 mod crypto;
 mod error;
 mod extensions;
-mod fs;
+mod vmefs;
 mod meta;
 
 type Result<T> = std::result::Result<T, error::Error>;
@@ -35,12 +35,12 @@ fn main() {
     let options = vec![fuser::MountOption::FSName("vmefs".to_string())];
 
     println!(
-        "Mounting VmeFS at {} with backend {}",
+        "Mounting VmeFs at {} with backend {}",
         mountpoint,
         backend_path.display()
     );
     let Ok(client) = client::VmeClient::new(u32::MAX) else {
         panic!("Unable to connect to {}", u32::MAX);
     };
-    fuser::mount2(VmeFS::new(client), mountpoint, &options).unwrap();
+    fuser::mount2(VmeFs::new(client), mountpoint, &options).unwrap();
 }
