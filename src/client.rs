@@ -57,8 +57,8 @@ impl VmeClient {
         self.send_recv(&op_req)
     }
 
-    pub fn readdir(&mut self, ino: u64) -> Result<FsOpResponse> {
-        let op_req = FsOpRequest::ReadDir { ino };
+    pub fn readdir(&mut self, ino: u64, offset: i64) -> Result<FsOpResponse> {
+        let op_req = FsOpRequest::ReadDir { ino, offset };
         self.send_recv(&op_req)
     }
 

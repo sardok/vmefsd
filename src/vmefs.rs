@@ -154,30 +154,17 @@ impl VmeFs {
         metafile.to_file_attr(host_metadata)
     }
 
-    fn readdir_impl(&mut self, ino: u64) -> Result<Vec<ReaddirEntry>> {
-        let FsOpResponse::ReadDir { entries } = self.client.readdir(ino)? else {
+    fn readdir_impl(&mut self, ino: u64, offset: i64) -> Result<Vec<ReaddirEntry>> {
+        let host_offset = std::cmp::max(0, offset - 2);
+        let FsOpResponse::ReadDir { entries } = self.client.readdir(ino, host_offset)? else {
             return Err(Error::AbiError("ReadDir response expected"));
         };
-        let mut dirs = Vec::with_capacity(entries.len() + 2);
+        let mut dirs = Vec::with_capacity(entries.len());
 
         for entry in entries {
             let host_metadata = entry.host_metadata.clone();
             let metafile: MetaFile = entry.try_into()?;
             let attr = metafile.to_file_attr(host_metadata)?;
-
-            if attr.ino == ino {
-                // Add . and ..
-                dirs.push(ReaddirEntry {
-                    name: ".".to_string(),
-                    ino,
-                    kind: FileType::Directory,
-                });
-                dirs.push(ReaddirEntry {
-                    name: "..".to_string(),
-                    ino,
-                    kind: FileType::Directory,
-                });
-            }
 
             dirs.push(ReaddirEntry {
                 name: metafile.name,
@@ -326,10 +313,38 @@ impl Filesystem for VmeFs {
         offset: i64,
         mut reply: ReplyDirectory,
     ) {
-        let entries = self.readdir_impl(ino).expect("read_impl");
-        let offset = offset as usize;
-        for (i, entry) in entries.into_iter().enumerate().skip(offset) {
-            if reply.add(entry.ino, (i + 1) as i64, entry.kind, &entry.name) {
+        let entries = match self.readdir_impl(ino, offset) {
+            Ok(e) => e,
+            Err(e) => {
+                log::error!("readdir failed for ino {}: {:?}", ino, e);
+                reply.error(EIO);
+                return;
+            }
+        };
+
+        let mut current_offset = offset;
+
+        // Host returns only real files. Guest injects . and ..
+        if current_offset == 0 {
+            if reply.add(ino, 1, FileType::Directory, ".") {
+                reply.ok();
+                return;
+            }
+            current_offset += 1;
+        }
+
+        if current_offset == 1 {
+            // We use parent ino if we can find it, but for now just use ino
+            if reply.add(ino, 2, FileType::Directory, "..") {
+                reply.ok();
+                return;
+            }
+            current_offset += 1;
+        }
+
+        for entry in entries {
+            current_offset += 1;
+            if reply.add(entry.ino, current_offset, entry.kind, &entry.name) {
                 break;
             }
         }
