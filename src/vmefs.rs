@@ -42,6 +42,28 @@ impl VmeFs {
         Self { client }
     }
 
+    pub fn initialize(&mut self) -> Result<()> {
+        let metafile = MetaFile {
+            name: ".".to_owned(), // ignored
+            metadata: Metadata {
+                size: 0,
+                mode: 0o755 | libc::S_IFDIR,
+                uid: 0,
+                gid: 0,
+                atime: None,
+                mtime: None,
+                ctime: None,
+            }
+        };
+
+        let encrypted: EncryptedMetaFile = metafile.try_into()?;
+        let FsOpResponse::Empty = self.client.initroot(encrypted)? else {
+            return Err(Error::AbiError("Empty response expected".to_owned()));
+        };
+
+        Ok(())
+    }
+
     fn create_impl(
         &mut self,
         req: &Request,
@@ -67,7 +89,7 @@ impl VmeFs {
 
         let encrypted: EncryptedMetaFile = metafile.try_into()?;
         let FsOpResponse::GetAttr { entry } = self.client.create(parent, encrypted, flags)? else {
-            return Err(Error::AbiError("GetAttr response expected"));
+            return Err(Error::AbiError("GetAttr response expected".to_owned()));
         };
         let host_metadata = entry.host_metadata.clone();
         let metafile: MetaFile = entry.try_into()?;
@@ -99,7 +121,7 @@ impl VmeFs {
 
         let encrypted: EncryptedMetaFile = metafile.try_into()?;
         let FsOpResponse::GetAttr { entry } = self.client.mkdir(parent, encrypted)? else {
-            return Err(Error::AbiError("GetAttr response expected"));
+            return Err(Error::AbiError("GetAttr response expected".to_owned()));
         };
         let host_metadata = entry.host_metadata.clone();
         let metafile: MetaFile = entry.try_into()?;
@@ -109,7 +131,7 @@ impl VmeFs {
 
     fn read_impl(&mut self, ino: u64) -> Result<Vec<u8>> {
         let FsOpResponse::FileContent { content } = self.client.read(ino)? else {
-            return Err(Error::AbiError("FileContent response expected"));
+            return Err(Error::AbiError("FileContent response expected".to_owned()));
         };
         crypto::decrypt(&content)
     }
@@ -131,13 +153,13 @@ impl VmeFs {
         let encrypted = crypto::encrypt(&content)?;
         match self.client.write(ino, encrypted, flags)? {
             FsOpResponse::Empty => Ok(data.len()),
-            _ => Err(Error::AbiError("Empty response expected")),
+            _ => Err(Error::AbiError("Empty response expected".to_owned())),
         }
     }
 
     fn getattr_impl(&mut self, ino: u64) -> Result<FileAttr> {
         let FsOpResponse::GetAttr { entry } = self.client.getattr(ino)? else {
-            return Err(Error::AbiError("GetAttr response expected"));
+            return Err(Error::AbiError("GetAttr response expected".to_owned()));
         };
         let host_metadata = entry.host_metadata.clone();
         let metafile: MetaFile = entry.try_into()?;
@@ -147,7 +169,7 @@ impl VmeFs {
     fn lookup_impl(&mut self, parent: u64, name: &str) -> Result<FileAttr> {
         let encrypted_name = crypto::encrypt_name(name)?;
         let FsOpResponse::GetAttr { entry } = self.client.lookup(parent, encrypted_name)? else {
-            return Err(Error::AbiError("GetAttr response expected"));
+            return Err(Error::AbiError("GetAttr response expected".to_owned()));
         };
         let host_metadata = entry.host_metadata.clone();
         let metafile: MetaFile = entry.try_into()?;
@@ -157,7 +179,7 @@ impl VmeFs {
     fn readdir_impl(&mut self, ino: u64, offset: i64) -> Result<Vec<ReaddirEntry>> {
         let host_offset = std::cmp::max(0, offset - 2);
         let FsOpResponse::ReadDir { entries } = self.client.readdir(ino, host_offset)? else {
-            return Err(Error::AbiError("ReadDir response expected"));
+            return Err(Error::AbiError("ReadDir response expected".to_owned()));
         };
         let mut dirs = Vec::with_capacity(entries.len());
 
@@ -190,7 +212,7 @@ impl VmeFs {
 
     fn get_metafile_impl(&mut self, ino: u64) -> Result<MetaFile> {
         let FsOpResponse::GetAttr { entry } = self.client.getattr(ino)? else {
-            return Err(Error::AbiError("GetAttr response expected"));
+            return Err(Error::AbiError("GetAttr response expected".to_owned()));
         };
         let metafile: MetaFile = entry.try_into()?;
         Ok(metafile)
@@ -200,7 +222,7 @@ impl VmeFs {
         let serialized = serde_cbor::to_vec(&metadata)?;
         let encrypted = crypto::encrypt(&serialized)?;
         let FsOpResponse::GetAttr { entry } = self.client.setattr(ino, encrypted)? else {
-            return Err(Error::AbiError("GetAttr response expected"));
+            return Err(Error::AbiError("GetAttr response expected".to_owned()));
         };
         let host_metadata = entry.host_metadata.clone();
         let metafile: MetaFile = entry.try_into()?;

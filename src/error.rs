@@ -5,7 +5,7 @@ use serde_cbor::Error as SerdeCborError;
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
     #[error("ABI error: {0}")]
-    AbiError(&'static str),
+    AbiError(String),
     #[error("Serde cbor error")]
     CborError(#[from] SerdeCborError),
     #[error("Crypto error: {0}")]
