@@ -9,14 +9,35 @@ use crate::error::Error;
 use crate::crypto::EncryptedMetaFile;
 
 pub struct VmeClient {
-    stream: VsockStream,
+    addr: VsockAddr,
 }
 
 impl VmeClient {
-    pub fn new(cid: u32) -> io::Result<Self> {
+    pub fn new(cid: u32) -> Self {
         let addr = VsockAddr::new(cid, SERVER_PORT);
-        let stream = VsockStream::connect(&addr)?;
-        Ok(Self { stream })
+        Self { addr }
+    }
+
+    fn try_connect(cid: u32) -> io::Result<()> {
+        let addr = VsockAddr::new(cid, SERVER_PORT);
+        let res = VsockStream::connect(&addr);
+        if let Err(e) = res {
+            log::warn!("Unable to connect to CID {}: {}", cid, SERVER_PORT);
+            return Err(e);
+        }
+
+        log::info!("Successfully connected to CID {}", cid);
+        Ok(())
+    }
+
+    pub fn from_cids() -> io::Result<Self> {
+        match Self::try_connect(vsock::VMADDR_CID_HOST) {
+            Ok(_) => Ok(Self::new(vsock::VMADDR_CID_HOST)),
+            Err(_) => {
+                let _ = Self::try_connect(vsock::VMADDR_CID_LOCAL)?;
+                Ok(Self::new(vsock::VMADDR_CID_LOCAL))
+            }
+        }
     }
 
     pub fn initroot(&mut self, encrypted_meta_file: EncryptedMetaFile) -> Result<FsOpResponse> {
@@ -101,8 +122,9 @@ impl VmeClient {
     }
 
     fn send_recv(&mut self, op_req: FsOpRequest) -> Result<FsOpResponse> {
-        self.send(op_req)?;
-        let response = self.recv()?;
+        let mut stream = VsockStream::connect(&self.addr)?;
+        Self::send(&mut stream, op_req)?;
+        let response = Self::recv(&mut stream)?;
         match response {
             Response::FileSystem(resp) => Ok(resp),
             Response::Failed(e) => Err(Error::AbiError(e.to_string())),
@@ -110,22 +132,22 @@ impl VmeClient {
         }
     }
 
-    fn send(&mut self, op_req: FsOpRequest) -> Result<()> {
+    fn send(stream: &mut VsockStream, op_req: FsOpRequest) -> Result<()> {
         let request = Request::FileSystem(op_req);
         let payload = serde_cbor::to_vec(&request)?;
 
-        self.stream.write_all(&payload.len().to_le_bytes())?;
-        self.stream.write_all(&payload)?;
+        stream.write_all(&payload.len().to_le_bytes())?;
+        stream.write_all(&payload)?;
         Ok(())
     }
 
-    fn recv(&mut self) -> Result<Response> {
+    fn recv(stream: &mut VsockStream) -> Result<Response> {
         let mut size_buf = [0u8; std::mem::size_of::<usize>()];
-        self.stream.read_exact(&mut size_buf)?;
+        stream.read_exact(&mut size_buf)?;
         let size = usize::from_le_bytes(size_buf);
 
         let mut resp_buf = vec![0u8; size];
-        self.stream.read_exact(&mut resp_buf)?;
+        stream.read_exact(&mut resp_buf)?;
         let response: Response = serde_cbor::from_slice(&resp_buf)?;
         Ok(response)
     }

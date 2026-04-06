@@ -39,22 +39,7 @@ fn main() {
         mountpoint,
         backend_path.display()
     );
-    let client = match client::VmeClient::new(vsock::VMADDR_CID_HOST) {
-        Ok(client) => {
-            log::info!("Connected to CID_HOST");
-            client
-        },
-        Err(e) => {
-            log::warn!("Unable to connect to CID_HOST: {}", e);
-            let Ok(client) = client::VmeClient::new(vsock::VMADDR_CID_LOCAL) else {
-                log::error!("Unable to connect to CID_LOCAL: {}", e);
-                std::process::exit(1);
-            };
-
-            log::info!("Connected to CID_LOCAL");
-            client
-        }
-    };
+    let client = client::VmeClient::from_cids().expect("Failed to find vme-runner cid");
     let mut vmefs = VmeFs::new(client);
     vmefs.initialize().expect("Failed to initialize VmeFs");
     fuser::mount2(vmefs, mountpoint, &options).unwrap();
