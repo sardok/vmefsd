@@ -232,15 +232,34 @@ impl VmeFs {
         Ok(dirs)
     }
 
+    fn rename_impl(
+        &mut self,
+        old_parent: u64,
+        old_name: &str,
+        new_parent: u64,
+        new_name: &str,
+    ) -> Result<()> {
+        let old_name_encrypted = crypto::encrypt_name(old_name)?;
+        let new_name_encrypted = crypto::encrypt_name(new_name)?;
+        let FsOpResponse::Empty = self.client.rename(old_parent, old_name_encrypted, new_parent, new_name_encrypted)? else {
+            return Err(Error::AbiError("Empty response expected".to_owned()));
+        };
+        Ok(())
+    }
+
     fn unlink_impl(&mut self, parent: u64, name: &str) -> Result<()> {
         let encrypted_name = crypto::encrypt_name(name)?;
-        let _ = self.client.unlink(parent, encrypted_name)?;
+        let FsOpResponse::Empty = self.client.unlink(parent, encrypted_name)? else {
+            return Err(Error::AbiError("Empty response expected".to_owned()));
+        };
         Ok(())
     }
 
     fn rmdir_impl(&mut self, parent: u64, name: &str) -> Result<()> {
         let encrypted_name = crypto::encrypt_name(name)?;
-        let _ = self.client.rmdir(parent, encrypted_name)?;
+        let FsOpResponse::Empty = self.client.rmdir(parent, encrypted_name)? else {
+            return Err(Error::AbiError("Empty response expected".to_owned()));
+        };
         Ok(())
     }
 
@@ -398,6 +417,24 @@ impl Filesystem for VmeFs {
         } else {
             reply.data(&[]);
         }
+    }
+
+    fn rename(
+        &mut self,
+        _req: &Request,
+        parent: u64,
+        name: &OsStr,
+        newparent: u64,
+        newname: &OsStr,
+        _flags: u32,
+        reply: ReplyEmpty,
+    ) {
+        // TODO: handle flags
+        let name = to_str_or_reply_err!(name, reply);
+        let newname = to_str_or_reply_err!(newname, reply);
+        let resp = self.rename_impl(parent, name, newparent, newname);
+        let _ = extract_response_or_reply_err!(resp, reply);
+        reply.ok();
     }
 
     fn write(

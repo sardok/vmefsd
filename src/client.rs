@@ -99,6 +99,17 @@ impl VmeClient {
         self.send_recv(op_req)
     }
 
+    pub fn rename(
+        &mut self,
+        parent: u64,
+        name: String,
+        new_parent: u64,
+        new_name: String,
+    ) -> Result<FsOpResponse> {
+        let op_req = FsOpRequest::Rename { parent, name, new_parent, new_name };
+        self.send_recv(op_req)
+    }
+
     pub fn setattr(&mut self, ino: u64, encrypted_metadata: Vec<u8>) -> Result<FsOpResponse> {
         let op_req = FsOpRequest::SetAttr {
             ino,
