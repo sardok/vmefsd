@@ -1,6 +1,6 @@
-use std::io::{self, Read, Write};
+use std::io::{self, Error as IoError, Read, Write};
 
-use fortanix_vme_abi::{SERVER_PORT, Request, Response};
+use fortanix_vme_abi::{SERVER_PORT, Error as AbiError, Request, Response};
 use fortanix_vme_abi::fs::{FsOpResponse, FsOpRequest};
 use vsock::{VsockStream, VsockAddr};
 
@@ -27,6 +27,12 @@ impl VmeClient {
         }
 
         log::info!("Successfully connected to CID {}", cid);
+        {
+            // TODO: Should not be necessary
+            let mut stream = res?;
+            Self::send(&mut stream, Request::Init).expect("send");
+            let _ = Self::recv(&mut stream).expect("recv");
+        }
         Ok(())
     }
 
@@ -123,18 +129,26 @@ impl VmeClient {
 
     fn send_recv(&mut self, op_req: FsOpRequest) -> Result<FsOpResponse> {
         let mut stream = VsockStream::connect(&self.addr)?;
-        Self::send(&mut stream, op_req)?;
+        Self::send(&mut stream, Request::FileSystem(op_req))?;
         let response = Self::recv(&mut stream)?;
         match response {
             Response::FileSystem(resp) => Ok(resp),
+            Response::Failed(AbiError::Command(kind)) => {
+                let err_kind = io::ErrorKind::from(kind);
+                let io_error = IoError::from(err_kind);
+                Err(Error::IoError(io_error))
+            }
+            Response::Failed(AbiError::SystemError(errno)) => {
+                let io_error = IoError::from_raw_os_error(errno);
+                Err(Error::IoError(io_error))
+            }
             Response::Failed(e) => Err(Error::AbiError(e.to_string())),
             r => Err(Error::AbiError(format!("Unexpected response type from runner: {:?}", r))),
         }
     }
 
-    fn send(stream: &mut VsockStream, op_req: FsOpRequest) -> Result<()> {
-        let request = Request::FileSystem(op_req);
-        let payload = serde_cbor::to_vec(&request)?;
+    fn send(stream: &mut VsockStream, req: Request) -> Result<()> {
+        let payload = serde_cbor::to_vec(&req)?;
 
         stream.write_all(&payload.len().to_le_bytes())?;
         stream.write_all(&payload)?;
@@ -142,7 +156,7 @@ impl VmeClient {
     }
 
     fn recv(stream: &mut VsockStream) -> Result<Response> {
-        let mut size_buf = [0u8; std::mem::size_of::<usize>()];
+        let mut size_buf = [0u8; usize::BITS as usize / 8];
         stream.read_exact(&mut size_buf)?;
         let size = usize::from_le_bytes(size_buf);
 

@@ -32,7 +32,11 @@ fn main() {
         std_fs::create_dir_all(&backend_path).expect("Failed to create backend directory");
     }
 
-    let options = vec![fuser::MountOption::FSName("vmefs".to_string())];
+    let options = vec![
+        fuser::MountOption::FSName("vmefs".to_string()),
+        fuser::MountOption::DirSync,
+        fuser::MountOption::Sync,
+    ];
 
     println!(
         "Mounting VmeFs at {} with backend {}",

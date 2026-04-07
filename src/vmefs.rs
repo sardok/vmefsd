@@ -10,7 +10,7 @@ use libc::{EINVAL, EIO, ENOENT};
 
 use crate::Result;
 use crate::crypto::{self, EncryptedMetaFile};
-use crate::error::Error;
+use crate::error::{error_kind_to_libc, Error};
 use crate::extensions::ToEpochExt;
 use crate::meta::{MetaFile, Metadata};
 use crate::client::VmeClient;
@@ -31,6 +31,25 @@ macro_rules! to_string_or_reply_err {
     ($name:expr, $reply:expr) => {
         to_str_or_reply_err!($name, $reply).to_owned()
     };
+}
+
+macro_rules! extract_response_or_reply_err {
+    ($res:expr, $reply:expr) => {
+        match $res {
+            Ok(res) => res,
+            Err(Error::IoError(io_error)) => {
+                let errno = error_kind_to_libc(io_error.kind());
+                log::warn!("Request failed with io error {:?} (errno: {})", io_error, errno);
+                $reply.error(errno);
+                return;
+            }
+            Err(err) => {
+                log::error!("Request failed with {:?}", err);
+                $reply.error(EIO);
+                return;
+            }
+        }
+    }
 }
 
 pub struct VmeFs {
@@ -246,23 +265,15 @@ impl Filesystem for VmeFs {
         }
         let name_str = to_string_or_reply_err!(name, reply);
 
-        match self.lookup_impl(parent, &name_str) {
-            Ok(attr) => reply.entry(&TTL, &attr, 0),
-            Err(e) => {
-                log::error!("lookup failed for name {}: {:?}", name_str, e);
-                reply.error(ENOENT);
-            }
-        }
+        let resp = self.lookup_impl(parent, &name_str);
+        let attr = extract_response_or_reply_err!(resp, reply);
+        reply.entry(&TTL, &attr, 0);
     }
 
     fn getattr(&mut self, _req: &Request, ino: u64, reply: ReplyAttr) {
-        match self.getattr_impl(ino) {
-            Ok(attr) => reply.attr(&TTL, &attr),
-            Err(e) => {
-                log::error!("getattr failed for ino {}: {:?}", ino, e);
-                reply.error(ENOENT);
-            }
-        }
+        let resp = self.getattr_impl(ino);
+        let attr = extract_response_or_reply_err!(resp, reply);
+        reply.attr(&TTL, &attr);
     }
 
     fn setattr(
@@ -318,13 +329,9 @@ impl Filesystem for VmeFs {
             metadata.ctime = Some(t.to_u64());
         }
 
-        match self.setattr_impl(ino, metadata) {
-            Ok(attr) => reply.attr(&TTL, &attr),
-            Err(e) => {
-                log::error!("setattr failed for ino {}: {:?}", ino, e);
-                reply.error(EIO);
-            }
-        }
+        let resp = self.setattr_impl(ino, metadata);
+        let attr = extract_response_or_reply_err!(resp, reply);
+        reply.attr(&TTL, &attr);
     }
 
     fn readdir(
@@ -335,15 +342,8 @@ impl Filesystem for VmeFs {
         offset: i64,
         mut reply: ReplyDirectory,
     ) {
-        let entries = match self.readdir_impl(ino, offset) {
-            Ok(e) => e,
-            Err(e) => {
-                log::error!("readdir failed for ino {}: {:?}", ino, e);
-                reply.error(EIO);
-                return;
-            }
-        };
-
+        let resp = self.readdir_impl(ino, offset);
+        let entries = extract_response_or_reply_err!(resp, reply);
         let mut current_offset = offset;
 
         // Host returns only real files. Guest injects . and ..
@@ -384,7 +384,8 @@ impl Filesystem for VmeFs {
         _lock: Option<u64>,
         reply: ReplyData,
     ) {
-        let content = self.read_impl(ino).expect("read_impl");
+        let resp = self.read_impl(ino);
+        let content = extract_response_or_reply_err!(resp, reply);
         let offset = offset as usize;
         let size = size as usize;
         if offset < content.len() {
@@ -407,13 +408,9 @@ impl Filesystem for VmeFs {
         _lock: Option<u64>,
         reply: ReplyWrite,
     ) {
-        match self.write_impl(ino, offset as u64, data, flags) {
-            Ok(written) => reply.written(written as u32),
-            Err(e) => {
-                log::error!("write failed for ino {}: {:?}", ino, e);
-                reply.error(EIO);
-            }
-        }
+        let resp = self.write_impl(ino, offset as u64, data, flags);
+        let written = extract_response_or_reply_err!(resp, reply);
+        reply.written(written as u32);
     }
 
     fn create(
@@ -427,13 +424,9 @@ impl Filesystem for VmeFs {
         reply: ReplyCreate,
     ) {
         let name_str = to_string_or_reply_err!(name, reply);
-        match self.create_impl(req, parent, name_str, mode, umask, flags) {
-            Ok(attr) => reply.created(&TTL, &attr, 0, 0, 0),
-            Err(e) => {
-                log::error!("create failed: {:?}", e);
-                reply.error(EIO);
-            }
-        }
+        let resp = self.create_impl(req, parent, name_str, mode, umask, flags);
+        let attr = extract_response_or_reply_err!(resp, reply);
+        reply.created(&TTL, &attr, 0, 0, 0);
     }
 
     fn mkdir(
@@ -446,35 +439,22 @@ impl Filesystem for VmeFs {
         reply: ReplyEntry,
     ) {
         let name_str = to_string_or_reply_err!(name, reply);
-        match self.mkdir_impl(req, parent, name_str, mode, umask) {
-            Ok(attr) => reply.entry(&TTL, &attr, 0),
-            Err(e) => {
-                log::error!("mkdir failed: {:?}", e);
-                reply.error(EIO);
-            }
-        }
+        let resp = self.mkdir_impl(req, parent, name_str, mode, umask);
+        let attr = extract_response_or_reply_err!(resp, reply);
+        reply.entry(&TTL, &attr, 0);
     }
 
     fn unlink(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: ReplyEmpty) {
         let name = to_str_or_reply_err!(name, reply);
-
-        match self.unlink_impl(parent, name) {
-            Ok(_) => reply.ok(),
-            Err(e) => {
-                log::error!("unlink failed for name {}: {:?}", name, e);
-                reply.error(ENOENT);
-            }
-        }
+        let resp = self.unlink_impl(parent, name);
+        let _ = extract_response_or_reply_err!(resp, reply);
+        reply.ok();
     }
 
     fn rmdir(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: ReplyEmpty) {
         let name = to_str_or_reply_err!(name, reply);
-        match self.rmdir_impl(parent, name) {
-            Ok(_) => reply.ok(),
-            Err(e) => {
-                log::error!("rmdir failed for name {}: {:?}", name, e);
-                reply.error(ENOENT);
-            }
-        }
+        let resp = self.rmdir_impl(parent, name);
+        let _ = extract_response_or_reply_err!(resp, reply);
+        reply.ok();
     }
 }
