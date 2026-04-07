@@ -152,11 +152,18 @@ impl VmeFs {
         let FsOpResponse::FileContent { content } = self.client.read(ino)? else {
             return Err(Error::AbiError("FileContent response expected".to_owned()));
         };
-        crypto::decrypt(&content)
+
+        if content.len() > 0 {
+            crypto::decrypt(&content)
+        } else {
+            Ok(content)
+        }
     }
 
     fn write_impl(&mut self, ino: u64, mut offset: u64, data: &[u8], flags: i32) -> Result<usize> {
         let mut content = self.read_impl(ino)?;
+        let mut metafile = self.get_metafile_impl(ino)?;
+
         let mut flags = flags;
         if flags & libc::O_APPEND != 0 {
             offset = content.len() as u64;
@@ -169,6 +176,14 @@ impl VmeFs {
             content.resize(offset + data.len(), 0);
         }
         content[offset..offset + data.len()].copy_from_slice(data);
+
+        // Update metadata size if it changed
+        if content.len() as u64 != metafile.metadata.size {
+            metafile.metadata.size = content.len() as u64;
+            let encrypted_meta: EncryptedMetaFile = metafile.try_into()?;
+            self.client.setattr(ino, encrypted_meta.metadata)?;
+        }
+
         let encrypted = crypto::encrypt(&content)?;
         match self.client.write(ino, encrypted, flags)? {
             FsOpResponse::Empty => Ok(data.len()),
@@ -237,10 +252,9 @@ impl VmeFs {
         Ok(metafile)
     }
 
-    fn setattr_impl(&mut self, ino: u64, metadata: Metadata) -> Result<FileAttr> {
-        let serialized = serde_cbor::to_vec(&metadata)?;
-        let encrypted = crypto::encrypt(&serialized)?;
-        let FsOpResponse::GetAttr { entry } = self.client.setattr(ino, encrypted)? else {
+    fn setattr_impl(&mut self, ino: u64, metafile: MetaFile) -> Result<FileAttr> {
+        let encrypted: EncryptedMetaFile = metafile.try_into()?;
+        let FsOpResponse::GetAttr { entry } = self.client.setattr(ino, encrypted.metadata)? else {
             return Err(Error::AbiError("GetAttr response expected".to_owned()));
         };
         let host_metadata = entry.host_metadata.clone();
@@ -294,42 +308,32 @@ impl Filesystem for VmeFs {
         _flags: Option<u32>,
         reply: ReplyAttr,
     ) {
-        let metafile = match self.get_metafile_impl(ino) {
-            Ok(m) => m,
-            Err(e) => {
-                log::error!("setattr failed to get metafile for ino {}: {:?}", ino, e);
-                reply.error(ENOENT);
-                return;
-            }
-        };
-        let MetaFile {
-            name: _,
-            mut metadata,
-        } = metafile;
+        let resp = self.get_metafile_impl(ino);
+        let mut metafile = extract_response_or_reply_err!(resp, reply);
 
         if let Some(mode) = mode {
-            metadata.mode = mode;
+            metafile.metadata.mode = mode;
         }
         if let Some(uid) = uid {
-            metadata.uid = uid;
+            metafile.metadata.uid = uid;
         }
         if let Some(gid) = gid {
-            metadata.gid = gid;
+            metafile.metadata.gid = gid;
         }
         if let Some(size) = size {
-            metadata.size = size;
+            metafile.metadata.size = size;
         }
         if let Some(t) = atime {
-            metadata.atime = Some(t.to_u64());
+            metafile.metadata.atime = Some(t.to_u64());
         }
         if let Some(t) = mtime {
-            metadata.mtime = Some(t.to_u64());
+            metafile.metadata.mtime = Some(t.to_u64());
         }
         if let Some(t) = ctime {
-            metadata.ctime = Some(t.to_u64());
+            metafile.metadata.ctime = Some(t.to_u64());
         }
 
-        let resp = self.setattr_impl(ino, metadata);
+        let resp = self.setattr_impl(ino, metafile);
         let attr = extract_response_or_reply_err!(resp, reply);
         reply.attr(&TTL, &attr);
     }

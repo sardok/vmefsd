@@ -11,6 +11,7 @@ use crate::error::Error;
 
 const STATIC_KEY: &[u8; 32] = b"static_encryption_key_32_bytes!!";
 const STATIC_NONCE: &[u8; 12] = b"static_nonce";
+const BASE64_CONFIG: general_purpose::GeneralPurpose = general_purpose::URL_SAFE_NO_PAD;
 
 
 pub fn encrypt(data: &[u8]) -> Result<Vec<u8>, Error> {
@@ -33,7 +34,7 @@ pub fn decrypt(data: &[u8]) -> Result<Vec<u8>, Error> {
 
 pub fn encrypt_name(name: &str) -> Result<String, Error> {
     let encrypted = encrypt(name.as_bytes())?;
-    Ok(general_purpose::STANDARD_NO_PAD.encode(encrypted))
+    Ok(BASE64_CONFIG.encode(encrypted))
 }
 
 // This type is identical to MetaFile
@@ -55,7 +56,7 @@ impl TryFrom<MetaFile> for EncryptedMetaFile {
         // Encrypt and base64 encode name
         let encrypted_name = cipher
             .encrypt(nonce, meta.name.as_bytes())?;
-        let name_base64 = general_purpose::STANDARD_NO_PAD.encode(encrypted_name);
+        let name_base64 = BASE64_CONFIG.encode(encrypted_name);
 
         // Serialize and encrypt MetaFile structure
         let serialized_meta = serde_cbor::to_vec(&meta)?;
@@ -69,69 +70,19 @@ impl TryFrom<MetaFile> for EncryptedMetaFile {
     }
 }
 
-impl TryFrom<EncryptedMetaFile> for MetaFile {
-    type Error = Error;
-
-    fn try_from(enc: EncryptedMetaFile) -> Result<Self, Self::Error> {
-        let cipher = Aes256Gcm::new(STATIC_KEY.into());
-        let nonce = Nonce::from_slice(STATIC_NONCE);
-
-        // Decrypt metadata field
-        let decrypted_metadata = cipher
-            .decrypt(nonce, enc.metadata.as_slice())?;
-
-        // Deserialize to MetaFile
-        let meta: MetaFile = serde_cbor::from_slice(&decrypted_metadata)?;
-
-        Ok(meta)
-    }
-}
-
 impl TryFrom<FsEntry> for MetaFile {
     type Error = Error;
 
     fn try_from(value: FsEntry) -> Result<Self, Self::Error> {
-        let encrypted: EncryptedMetaFile = serde_cbor::from_slice(&value.metadata)?;
-        let metafile: MetaFile = encrypted.try_into()?;
+        let cipher = Aes256Gcm::new(STATIC_KEY.into());
+        let nonce = Nonce::from_slice(STATIC_NONCE);
+
+        // Decrypt metadata field
+        let decrypted = cipher
+            .decrypt(nonce, value.metadata.as_slice())?;
+
+        // Deserialize to MetaFile
+        let metafile: MetaFile = serde_cbor::from_slice(&decrypted)?;
         Ok(metafile)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::meta::Metadata;
-
-    #[test]
-    fn test_meta_conversion_roundtrip() {
-        let original_meta = MetaFile {
-            name: "test_file.txt".to_string(),
-            metadata: Metadata {
-                size: 1234,
-                mode: 0o644,
-                uid: 1000,
-                gid: 1000,
-                atime: None,
-                mtime: None,
-                ctime: None,
-            },
-        };
-
-        // Convert MetaFile to EncryptedMetaFile
-        let encrypted: EncryptedMetaFile = original_meta
-            .clone()
-            .try_into()
-            .expect("Failed to convert MetaFile to EncryptedMetaFile");
-
-        // Ensure encryption did something (name is not the same)
-        assert_ne!(encrypted.name, original_meta.name);
-
-        // Convert EncryptedMetaFile back to MetaFile
-        let decrypted: MetaFile = encrypted
-            .try_into()
-            .expect("Failed to convert EncryptedMetaFile to MetaFile");
-
-        // Verify roundtrip result matches original
-        assert_eq!(original_meta, decrypted);
     }
 }
