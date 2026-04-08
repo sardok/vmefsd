@@ -32,8 +32,8 @@ pub fn decrypt(data: &[u8]) -> Result<Vec<u8>, Error> {
     Ok(decrypted)
 }
 
-pub fn encrypt_name(name: &str) -> Result<String, Error> {
-    let encrypted = encrypt(name.as_bytes())?;
+pub fn encrypt_name(bytes: &[u8]) -> Result<String, Error> {
+    let encrypted = encrypt(bytes)?;
     Ok(BASE64_CONFIG.encode(encrypted))
 }
 

@@ -1,7 +1,7 @@
 use std::io::{self, Error as IoError, Read, Write};
 
 use fortanix_vme_abi::{SERVER_PORT, Error as AbiError, Request, Response};
-use fortanix_vme_abi::fs::{FsOpResponse, FsOpRequest};
+use fortanix_vme_abi::fs::{FsOpResponse, FsOpRequest, LinkTarget};
 use vsock::{VsockStream, VsockAddr};
 
 use crate::Result;
@@ -135,6 +135,43 @@ impl VmeClient {
 
     pub fn rmdir(&mut self, ino: u64, name: String) -> Result<FsOpResponse> {
         let op_req = FsOpRequest::RmDir { ino, name };
+        self.send_recv(op_req)
+    }
+
+    pub fn symlink(
+        &mut self,
+        parent: u64,
+        name: String,
+        target: LinkTarget,
+        metadata: Vec<u8>,
+    ) -> Result<FsOpResponse> {
+        let op_req = FsOpRequest::Symlink {
+            parent,
+            name,
+            target,
+            metadata,
+        };
+        self.send_recv(op_req)
+    }
+
+    pub fn readlink(&mut self, ino: u64) -> Result<FsOpResponse> {
+        let op_req = FsOpRequest::Readlink { ino };
+        self.send_recv(op_req)
+    }
+
+    pub fn link(
+        &mut self,
+        ino: u64,
+        new_parent: u64,
+        new_name: String,
+        metadata: Vec<u8>,
+    ) -> Result<FsOpResponse> {
+        let op_req = FsOpRequest::Link {
+            ino,
+            new_parent,
+            new_name,
+            metadata,
+        };
         self.send_recv(op_req)
     }
 

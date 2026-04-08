@@ -1,3 +1,5 @@
+#![feature(normalize_lexically)]
+
 use std::env;
 use std::fs as std_fs;
 use std::path::PathBuf;
@@ -44,7 +46,7 @@ fn main() {
         backend_path.display()
     );
     let client = client::VmeClient::from_cids().expect("Failed to find vme-runner cid");
-    let mut vmefs = VmeFs::new(client);
+    let mut vmefs = VmeFs::new(client, mountpoint.clone());
     vmefs.initialize().expect("Failed to initialize VmeFs");
     fuser::mount2(vmefs, mountpoint, &options).unwrap();
 }

@@ -1,7 +1,8 @@
 use std::ffi::OsStr;
+use std::path::{Component, Path};
 use std::time::{Duration, SystemTime};
 
-use fortanix_vme_abi::fs::FsOpResponse;
+use fortanix_vme_abi::fs::{FsOpResponse, LinkTarget};
 use fuser::{
     FileAttr, FileType, Filesystem, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty,
     ReplyEntry, ReplyWrite, Request,
@@ -54,11 +55,12 @@ macro_rules! extract_response_or_reply_err {
 
 pub struct VmeFs {
     client: VmeClient,
+    mountpoint: String,
 }
 
 impl VmeFs {
-    pub fn new(client: VmeClient) -> Self {
-        Self { client }
+    pub fn new(client: VmeClient, mountpoint: String) -> Self {
+        Self { client, mountpoint }
     }
 
     pub fn initialize(&mut self) -> Result<()> {
@@ -201,7 +203,7 @@ impl VmeFs {
     }
 
     fn lookup_impl(&mut self, parent: u64, name: &str) -> Result<FileAttr> {
-        let encrypted_name = crypto::encrypt_name(name)?;
+        let encrypted_name = crypto::encrypt_name(name.as_bytes())?;
         let FsOpResponse::GetAttr { entry } = self.client.lookup(parent, encrypted_name)? else {
             return Err(Error::AbiError("GetAttr response expected".to_owned()));
         };
@@ -239,28 +241,92 @@ impl VmeFs {
         new_parent: u64,
         new_name: &str,
     ) -> Result<()> {
-        let old_name_encrypted = crypto::encrypt_name(old_name)?;
-        let new_name_encrypted = crypto::encrypt_name(new_name)?;
+        let old_name_encrypted = crypto::encrypt_name(old_name.as_bytes())?;
+        let new_name_encrypted = crypto::encrypt_name(new_name.as_bytes())?;
         let FsOpResponse::Empty = self.client.rename(old_parent, old_name_encrypted, new_parent, new_name_encrypted)? else {
             return Err(Error::AbiError("Empty response expected".to_owned()));
         };
         Ok(())
     }
 
-    fn unlink_impl(&mut self, parent: u64, name: &str) -> Result<()> {
-        let encrypted_name = crypto::encrypt_name(name)?;
-        let FsOpResponse::Empty = self.client.unlink(parent, encrypted_name)? else {
+    fn rmdir_impl(&mut self, parent: u64, name: &str) -> Result<()> {
+        let encrypted_name = crypto::encrypt_name(name.as_bytes())?;
+        let FsOpResponse::Empty = self.client.rmdir(parent, encrypted_name)? else {
             return Err(Error::AbiError("Empty response expected".to_owned()));
         };
         Ok(())
     }
 
-    fn rmdir_impl(&mut self, parent: u64, name: &str) -> Result<()> {
-        let encrypted_name = crypto::encrypt_name(name)?;
-        let FsOpResponse::Empty = self.client.rmdir(parent, encrypted_name)? else {
-            return Err(Error::AbiError("Empty response expected".to_owned()));
+    fn symlink_impl(
+        &mut self,
+        req: &Request,
+        parent: u64,
+        name: &str,
+        target: &Path,
+    ) -> Result<FileAttr> {
+
+        // The target is manipulated with encryption.
+        // Canonicalize it to make things easier for host side
+        // and use its length as size in metafile.
+        let target = target.normalize_lexically()
+            .map_err(|e| Error::StdError(e.into()))?;
+        let name = name.to_owned();
+
+        let metafile = MetaFile {
+            name: name,
+            metadata: Metadata {
+                size: target.as_os_str().len() as u64,
+                mode: libc::S_IFLNK | 0o777,
+                uid: req.uid(),
+                gid: req.gid(),
+                atime: None,
+                mtime: None,
+                ctime: None,
+            }
         };
-        Ok(())
+
+        // If the target is within our mounted FS directory,
+        // each parent must be encrypted. Otherwise, the host
+        // side won't be able to locate the target path.
+        let target = self.encrypt_path(&target)?;
+
+        let EncryptedMetaFile {
+            name,
+            metadata,
+        } = metafile.try_into()?;
+        let FsOpResponse::GetAttr { entry } = self.client.symlink(parent, name, target, metadata)? else {
+            return Err(Error::AbiError("GetAttr response expected".to_owned()));
+        };
+        let host_metadata = entry.host_metadata.clone();
+        let metafile: MetaFile = entry.try_into()?;
+        let attr = metafile.to_file_attr(host_metadata)?;
+        Ok(attr)
+    }
+
+    fn readlink_impl(&mut self, ino: u64) -> Result<Vec<u8>> {
+        let FsOpResponse::Readlink { target } = self.client.readlink(ino)? else {
+            return Err(Error::AbiError("Readlink response expected".to_owned()));
+        };
+        Ok(target)
+    }
+
+    fn link_impl(
+        &mut self,
+        _req: &Request,
+        ino: u64,
+        new_parent: u64,
+        new_name: String,
+    ) -> Result<FileAttr> {
+        // TODO: Re-visit implementation.
+        let metafile = self.get_metafile_impl(ino)?;
+        let encrypted: EncryptedMetaFile = metafile.try_into()?;
+        let FsOpResponse::GetAttr { entry } = self.client.link(ino, new_parent, new_name, encrypted.metadata)? else {
+            return Err(Error::AbiError("GetAttr response expected".to_owned()));
+        };
+        let host_metadata = entry.host_metadata.clone();
+        let metafile: MetaFile = entry.try_into()?;
+        let attr = metafile.to_file_attr(host_metadata)?;
+        Ok(attr)
     }
 
     fn get_metafile_impl(&mut self, ino: u64) -> Result<MetaFile> {
@@ -279,6 +345,52 @@ impl VmeFs {
         let host_metadata = entry.host_metadata.clone();
         let metafile: MetaFile = entry.try_into()?;
         metafile.to_file_attr(host_metadata)
+    }
+
+    fn unlink_impl(&mut self, parent: u64, name: &str) -> Result<()> {
+        let encrypted_name = crypto::encrypt_name(name.as_bytes())?;
+        let FsOpResponse::Empty = self.client.unlink(parent, encrypted_name)? else {
+            return Err(Error::AbiError("Empty response expected".to_owned()));
+        };
+        Ok(())
+    }
+
+    // Skips part of the path common with mount point
+    // and encrypts each part of path components.
+    // If the path is not in mount point, then encrypts it as is.
+    fn encrypt_path(&self, path: &Path) -> Result<LinkTarget> {
+        // Check if path is within our mountpoint
+        if path.has_root() {
+            if !path.starts_with(self.mountpoint.clone()) {
+                let path: String = path.to_string_lossy().into();
+                let encrypted = crypto::encrypt_name(path.as_bytes())?;
+                Ok(LinkTarget::Absolute(encrypted))
+            } else {
+                let stripped = path.strip_prefix(self.mountpoint.clone())
+                    .map_err(|e| Error::StdError(e.into()))?;
+                let encrypted = Self::encrypt_path_components(stripped)?;
+                Ok(LinkTarget::Relative(encrypted))
+            }
+        } else {
+            let encrypted = Self::encrypt_path_components(path)?;
+            Ok(LinkTarget::Relative(encrypted))
+
+        }
+    }
+
+    fn encrypt_path_components(path: &Path) -> Result<String> {
+        let mut ecs = vec![];
+        for component in path.components() {
+            match component {
+                Component::Normal(os_str) => {
+                    let encrypted = crypto::encrypt_name(os_str.as_encoded_bytes())?;
+                   ecs.push(encrypted);
+                },
+                c => log::warn!("Unexpected path component: {:?}", c),
+            }
+        }
+
+        Ok(ecs.join("/"))
     }
 }
 
@@ -452,6 +564,40 @@ impl Filesystem for VmeFs {
         let resp = self.write_impl(ino, offset as u64, data, flags);
         let written = extract_response_or_reply_err!(resp, reply);
         reply.written(written as u32);
+    }
+
+    fn symlink(
+        &mut self,
+        req: &Request,
+        parent: u64,
+        name: &OsStr,
+        target: &Path,
+        reply: ReplyEntry,
+    ) {
+        let name = to_str_or_reply_err!(name, reply);
+        let resp = self.symlink_impl(req, parent, name, target);
+        let attr = extract_response_or_reply_err!(resp, reply);
+        reply.entry(&TTL, &attr, 0);
+    }
+
+    fn readlink(&mut self, _req: &Request, ino: u64, reply: ReplyData) {
+        let resp = self.readlink_impl(ino);
+        let target = extract_response_or_reply_err!(resp, reply);
+        reply.data(&target);
+    }
+
+    fn link(
+        &mut self,
+        req: &Request,
+        ino: u64,
+        new_parent: u64,
+        new_name: &OsStr,
+        reply: ReplyEntry,
+    ) {
+        let name_str = to_string_or_reply_err!(new_name, reply);
+        let resp = self.link_impl(req, ino, new_parent, name_str);
+        let attr = extract_response_or_reply_err!(resp, reply);
+        reply.entry(&TTL, &attr, 0);
     }
 
     fn create(

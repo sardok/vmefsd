@@ -1,3 +1,4 @@
+use std::error::Error as StdError;
 use std::io::{Error as IoError, ErrorKind};
 use aes_gcm::Error as AesError;
 use serde_cbor::Error as SerdeCborError;
@@ -12,6 +13,8 @@ pub enum Error {
     CryptoError(String),
     #[error("IO error")]
     IoError(#[from] IoError),
+    #[error("Std error")]
+    StdError(#[from] Box<dyn StdError>),
 }
 
 impl From<AesError> for Error {
