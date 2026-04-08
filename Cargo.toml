@@ -18,3 +18,4 @@ vsock = "0.5"
 
 [dev-dependencies]
 rand = "0.10"
+serial_test = "3.4"

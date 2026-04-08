@@ -1,11 +1,16 @@
-mod common;
-
-use common::with_runner_context;
 use std::fs;
 use std::os::unix::fs::symlink;
 
+use serial_test::serial;
+
+mod common;
+
+use common::with_runner_context;
+
 #[test]
-fn test_link_operations() {
+#[serial(runner)]
+fn link_ops() {
+
     with_runner_context(|context| {
         let mountpoint = &context.mountpoint;
 

@@ -1,10 +1,14 @@
-mod common;
-
-use common::with_runner_context;
 use std::fs;
 use std::io::Write;
 
+use serial_test::serial;
+
+mod common;
+
+use common::with_runner_context;
+
 #[test]
+#[serial(runner)]
 fn file_ops() {
     with_runner_context(|context| {
         let mountpoint = &context.mountpoint;

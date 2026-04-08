@@ -1,10 +1,14 @@
+use std::fs;
+
+use serial_test::serial;
+
 mod common;
 
 use common::with_runner_context;
-use std::fs;
 
 #[test]
-fn test_missing_operations() {
+#[serial(runner)]
+fn misc_ops() {
     with_runner_context(|context| {
         let mountpoint = &context.mountpoint;
 

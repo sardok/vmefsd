@@ -1,11 +1,15 @@
-mod common;
-
-use common::with_runner_context;
 use std::fs;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
+use serial_test::serial;
+
+mod common;
+
+use common::with_runner_context;
+
 #[test]
-fn test_directory_operations() {
+#[serial(runner)]
+fn directory_ops() {
     with_runner_context(|context| {
         let mountpoint = &context.mountpoint;
 
