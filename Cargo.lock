@@ -241,6 +241,7 @@ checksum = "d9c4f5dac5e15c24eb999c26181a6ca40b39fe946cbe4c263c7209467bc83af2"
 [[package]]
 name = "fortanix-vme-abi"
 version = "0.1.0"
+source = "git+https://github.com/sardok/rust-sgx.git?branch=vmefs#404ebf7ab2d5fac156fdbc2d0b31e74734117a18"
 dependencies = [
  "serde",
  "thiserror 1.0.69",

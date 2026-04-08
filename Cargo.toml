@@ -7,7 +7,7 @@ edition = "2021"
 aes-gcm = "0.10"
 base64 = "0.22.1"
 env_logger = "0.11"
-fortanix-vme-abi = { path = "../rust-sgx/fortanix-vme/fortanix-vme-abi", features = ["std"] }
+fortanix-vme-abi = { git = "https://github.com/sardok/rust-sgx.git", branch = "vmefs", features = ["std"] }
 fuser = "0.14"
 libc = "0.2"
 log = "0.4"
